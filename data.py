@@ -14,7 +14,7 @@ from pathlib import Path
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
-SEASONS = ["2022-23", "2023-24"]
+SEASONS = ["2022-23", "2023-24", "2024-25", "2025-26"]
 SEASON_TYPE = "Regular Season"
 REQUEST_DELAY = 1.2   # polite delay between requests (seconds)
 NBA_TIMEOUT = 60      # per-request timeout

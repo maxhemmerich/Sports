@@ -15,7 +15,7 @@ import time
 import requests
 import pandas as pd
 from pathlib import Path
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -50,7 +50,11 @@ def _get(path: str, params: dict | None = None) -> dict | list:
 
 
 def fetch_today_events() -> list[dict]:
-    """Return all NBA events scheduled for today (UTC)."""
+    """
+    Return NBA events commencing within the next 48 hours.
+    Uses a 48-hour window (not just today's date string) so UTC timestamps
+    never cause games to be missed due to timezone offset.
+    """
     today = date.today().isoformat()
     cache = DATA_DIR / f"events_{today}.json"
     if cache.exists():
@@ -58,17 +62,29 @@ def fetch_today_events() -> list[dict]:
         with open(cache) as f:
             return json.load(f)
 
+    now_utc = datetime.now(timezone.utc)
+    window_end = now_utc + timedelta(hours=48)
+
     data = _get(f"/sports/{SPORT}/events")
-    # Filter to games starting today (UTC)
-    today_events = []
+    print(f"  [api] Total NBA events returned: {len(data)}")
+
+    upcoming = []
     for ev in data:
-        commence = ev.get("commence_time", "")
-        if commence.startswith(today):
-            today_events.append(ev)
+        commence_str = ev.get("commence_time", "")
+        if not commence_str:
+            continue
+        try:
+            # Format: '2026-03-10T00:30:00Z'
+            commence_dt = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if now_utc <= commence_dt <= window_end:
+            upcoming.append(ev)
+
     with open(cache, "w") as f:
-        json.dump(today_events, f, indent=2)
-    print(f"  [saved] {len(today_events)} events for {today} → {cache}")
-    return today_events
+        json.dump(upcoming, f, indent=2)
+    print(f"  [saved] {len(upcoming)} events in next 48h → {cache}")
+    return upcoming
 
 
 def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
