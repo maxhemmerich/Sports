@@ -132,6 +132,7 @@ def screen_player(
     commence_time: str,
     df_history: pd.DataFrame,
     model,
+    def_lookup=None,
 ) -> dict | None:
     """
     Run the full screening pipeline for one player-line.
@@ -166,6 +167,7 @@ def screen_player(
         is_home=is_home_approx,
         game_date=game_date,
         df_history=df_history,
+        def_lookup=def_lookup,
     )
     if not feats:
         return None
@@ -267,11 +269,12 @@ def run_screener(
 
     print(f"[screener] {len(lines_df)} prop lines to evaluate.")
 
-    # Load historical data once
+    # Load all shared data once — avoids reloading per-player
+    from features import build_defense_lookup
     df_history = load_gamelogs()
+    def_lookup = build_defense_lookup()
+    print(f"[screener] Data loaded: {len(df_history)} game rows, {len(def_lookup)} defense entries.")
 
-    # Build best lines: for each player, pick the best available price
-    # Group by player_name + line, pick best over/under per bookmaker
     results = []
     seen_players = set()  # screen each player once (best available line)
 
@@ -302,6 +305,7 @@ def run_screener(
             commence_time=commence_time,
             df_history=df_history,
             model=model,
+            def_lookup=def_lookup,
         )
 
         if result:

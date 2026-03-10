@@ -244,6 +244,7 @@ def build_live_features(
     is_home: bool,
     game_date: str,
     df_history: pd.DataFrame | None = None,
+    def_lookup: pd.DataFrame | None = None,
 ) -> dict:
     """
     Build a single feature row for live prediction.
@@ -253,7 +254,8 @@ def build_live_features(
         opponent_team_abbr: e.g. 'GSW'
         is_home: True if player's team is home
         game_date: ISO date string 'YYYY-MM-DD'
-        df_history: pre-loaded game log DataFrame (optional, avoids reload)
+        df_history: pre-loaded game log DataFrame (avoids per-call reload)
+        def_lookup: pre-loaded defense lookup DataFrame (avoids per-call reload)
 
     Returns:
         dict mapping feature_col → value
@@ -261,7 +263,8 @@ def build_live_features(
     if df_history is None:
         df_history = load_gamelogs()
 
-    def_lookup = build_defense_lookup()
+    if def_lookup is None:
+        def_lookup = build_defense_lookup()
 
     # Filter to player's history before game_date
     player_df = df_history[
