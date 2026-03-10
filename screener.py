@@ -36,6 +36,9 @@ MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "4"))  # minimum edge % to flag
 MIN_LINE_DIFF = float(os.getenv("MIN_LINE_DIFF", "1.5"))  # minimum |pred - line| pts
 MAX_KELLY_FRACTION = float(os.getenv("MAX_KELLY_FRACTION", "0.05"))  # cap at 5% per bet
 MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "1.0"))  # max total bankroll % across all bets
+MIN_GAMES = int(os.getenv("MIN_GAMES", "20"))           # min career games in DB before flagging
+MIN_SEASON_GAMES = int(os.getenv("MIN_SEASON_GAMES", "15"))  # min games in current season (Oct–present)
+CURRENT_SEASON_START = "2025-10-01"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -44,7 +47,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 SIGMA_BY_MARKET = {
     "player_points":   5.0,
     "player_rebounds": 2.5,
-    "player_assists":  2.0,
+    "player_assists":  2.5,
 }
 
 
@@ -146,6 +149,13 @@ def screen_player(
     """
     player_rows = df_history[df_history["player_name"] == player_name]
     if player_rows.empty:
+        return None
+
+    if len(player_rows) < MIN_GAMES:
+        return None
+
+    current_rows = player_rows[player_rows["game_date"] >= pd.Timestamp(CURRENT_SEASON_START)]
+    if len(current_rows) < MIN_SEASON_GAMES:
         return None
 
     team_abbr = player_rows.sort_values("game_date").iloc[-1].get("team_abbreviation", "")
