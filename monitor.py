@@ -193,30 +193,63 @@ if not bets_df.empty:
     with st.expander("Raw Data"):
         st.dataframe(bets_df, use_container_width=True)
 
+# ── Arbitrage Opportunities ───────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("Arbitrage Opportunities (Pinnacle vs bet365)")
+
+try:
+    from odds import get_arbitrage_opportunities
+    arb_df = get_arbitrage_opportunities()
+    if arb_df.empty:
+        st.info("No arbitrage opportunities found. Arb requires both Pinnacle and bet365 lines for the same player/market.")
+    else:
+        st.success(f"{len(arb_df)} arb opportunity(ies) found!")
+        st.dataframe(arb_df, use_container_width=True, hide_index=True)
+        st.caption("Arb% = guaranteed profit as % of total stake. Bet both legs simultaneously.")
+except Exception as e:
+    st.info(f"Run screener first to check for arbitrage. ({e})")
+
 # ── Historical P&L ────────────────────────────────────────────────────────────
 st.markdown("---")
 st.subheader("Historical Bet Log")
 
-hist_df = load_all_results()
-if hist_df.empty:
-    st.info("No historical results yet. Bets are saved daily after running the screener.")
-else:
-    st.write(f"{len(hist_df)} total bet records across {hist_df['date'].nunique()} days")
+tracker_path = RESULTS_DIR / "bet_tracker.csv"
+if tracker_path.exists():
+    tracker_df = pd.read_csv(tracker_path)
+    settled = tracker_df[tracker_df["result"].isin(["WIN", "LOSS", "PUSH"])]
+    pending = tracker_df[~tracker_df["result"].isin(["WIN", "LOSS", "PUSH"])]
 
-    # P&L section — only if 'result' column exists (manual tracking)
-    if "result" in hist_df.columns:
-        won = hist_df[hist_df["result"] == "WIN"]
-        lost = hist_df[hist_df["result"] == "LOSS"]
-        h1, h2, h3 = st.columns(3)
-        h1.metric("Win Rate", f"{len(won) / len(hist_df) * 100:.1f}%")
-        h2.metric("Wins", len(won))
-        h3.metric("Losses", len(lost))
+    if not settled.empty:
+        won = settled[settled["result"] == "WIN"]
+        lost = settled[settled["result"] == "LOSS"]
+        push = settled[settled["result"] == "PUSH"]
+
+        pnl_won = (won["entered_$"] * won["odds"].apply(
+            lambda x: (abs(x) / 100) if x > 0 else (100 / abs(x))
+        )).sum() if not won.empty else 0
+        pnl_lost = lost["entered_$"].sum() if not lost.empty else 0
+        net_pnl = pnl_won - pnl_lost
+
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("Win Rate", f"{len(won) / len(settled) * 100:.1f}%" if settled.shape[0] else "N/A")
+        h2.metric("W / L / P", f"{len(won)} / {len(lost)} / {len(push)}")
+        h3.metric("Net P&L", f"${net_pnl:+.2f}")
+        h4.metric("Pending Bets", len(pending))
 
     st.dataframe(
-        hist_df.sort_values("date", ascending=False),
+        tracker_df.sort_values("date", ascending=False),
         use_container_width=True,
         hide_index=True,
     )
+    st.caption("Update the 'result' column in results/bet_tracker.csv with WIN / LOSS / PUSH after games settle.")
+else:
+    hist_df = load_all_results()
+    if hist_df.empty:
+        st.info("No bet history yet. Run the screener and log bets to track P&L.")
+    else:
+        st.write(f"{len(hist_df)} screened bet records across {hist_df['date'].nunique()} day(s)")
+        st.dataframe(hist_df.sort_values("date", ascending=False), use_container_width=True, hide_index=True)
+        st.caption("Run screener.py interactively to log which bets you actually placed.")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")

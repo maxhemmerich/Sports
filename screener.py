@@ -39,6 +39,14 @@ MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "1.0"))  # max total 
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
+# Scoring distribution std dev per market — used to convert prediction gap → win probability.
+# Points have wider spread than rebounds/assists.
+SIGMA_BY_MARKET = {
+    "player_points":   5.0,
+    "player_rebounds": 2.5,
+    "player_assists":  2.0,
+}
+
 
 def no_vig_probs(over_price: float, under_price: float) -> tuple[float, float]:
     """
@@ -56,14 +64,14 @@ def edge_from_prediction(
     line: float,
     p_over_fair: float,
     p_under_fair: float,
+    sigma: float = 5.0,
 ) -> tuple[str, float, float]:
     """
     Determine best bet side and edge %.
 
     The model predicts a point total. We translate that into a win probability
-    using a simple normal distribution assumption around the line.
-
-    sigma is estimated as ~5 pts (typical player scoring std dev at the line).
+    using a normal distribution around the line. Sigma varies by market:
+      points: ~5.0,  rebounds: ~2.5,  assists: ~2.0
 
     Returns:
         (side, model_win_prob, edge_pct)
@@ -72,8 +80,6 @@ def edge_from_prediction(
         edge_pct: model_prob - book_fair_prob  (as %)
     """
     from scipy import stats  # soft import for speed
-
-    sigma = 5.0  # conservative estimate for scoring distribution
 
     # P(score > line) given model predicts `prediction`
     p_over_model = 1 - stats.norm.cdf(line, loc=prediction, scale=sigma)
@@ -88,20 +94,19 @@ def edge_from_prediction(
         return "UNDER", p_under_model, edge_under
 
 
-def kelly_fraction(win_prob: float, decimal_odds: float) -> float:
+def kelly_fraction(win_prob: float, decimal_odds: float, edge_pct: float = 0.0) -> float:
     """
-    Full Kelly: f = (b*p - q) / b
-    Half-Kelly: f = full_kelly * 0.5
+    Edge-proportional bet sizing: fraction = edge_pct / 200
+    (i.e. 4% edge → 2% of bankroll, 8% edge → 4%, 10% → 5% capped)
+
+    This is simpler and more transparent than full Kelly — the bet size
+    scales directly with how confident the model is in the edge.
     Capped at MAX_KELLY_FRACTION.
     """
-    b = decimal_odds - 1
-    p = win_prob
-    q = 1 - p
-    if b <= 0:
+    if edge_pct <= 0:
         return 0.0
-    full_kelly = (b * p - q) / b
-    half_kelly = max(full_kelly * 0.5, 0.0)
-    return min(half_kelly, MAX_KELLY_FRACTION)
+    fraction = edge_pct / 200.0
+    return min(fraction, MAX_KELLY_FRACTION)
 
 
 def best_price_for_side(row: pd.Series, side: str) -> tuple[float | None, str | None]:
@@ -186,8 +191,11 @@ def screen_player(
     except Exception:
         return None
 
+    sigma = SIGMA_BY_MARKET.get(market, 5.0)
     try:
-        side, win_prob, edge_pct = edge_from_prediction(prediction, line, p_over_fair, p_under_fair)
+        side, win_prob, edge_pct = edge_from_prediction(
+            prediction, line, p_over_fair, p_under_fair, sigma=sigma
+        )
     except ImportError:
         side = "OVER" if diff > 0 else "UNDER"
         win_prob = 0.55 if abs(diff) > 2 else 0.52
@@ -199,7 +207,7 @@ def screen_player(
     price_col = float(over_price) if side == "OVER" else float(under_price)
     dec_odds = american_to_decimal(price_col)
 
-    kf = kelly_fraction(win_prob, dec_odds)
+    kf = kelly_fraction(win_prob, dec_odds, edge_pct=edge_pct)
     bet_dollars = round(kf * BANKROLL, 2)
 
     return {
@@ -414,6 +422,78 @@ def run_screener(
     return bets_df
 
 
+TRACKER_PATH = RESULTS_DIR / "bet_tracker.csv"
+
+
+def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
+    """
+    Interactive: ask which flagged bets were placed and log them to the tracker.
+    Appends to results/bet_tracker.csv with columns:
+        date, player, market, line, side, odds, bookmaker, edge_pct,
+        suggested_$, entered_$, result
+    """
+    if bets_df.empty:
+        return
+
+    print("\n" + "=" * 60)
+    print("Which bets did you place?")
+    print("Enter row numbers (e.g. 1,3) or press Enter to skip:")
+    try:
+        raw = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    if not raw:
+        return
+
+    try:
+        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip()]
+    except ValueError:
+        print("[tracker] Invalid input — skipping.")
+        return
+
+    logged = []
+    today = date.today().isoformat()
+    for idx in indices:
+        if idx < 0 or idx >= len(bets_df):
+            print(f"  [skip] Row {idx + 1} out of range.")
+            continue
+        row = bets_df.iloc[idx]
+        label = f"  {row['player']} | {row.get('market','').replace('player_','')} | {row['side']} {row['line']} @ {int(row['odds']):+d}"
+        print(label)
+        try:
+            amt_raw = input(f"    Amount bet ($, or Enter to use suggested ${row['bet_dollars']:.2f}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        entered = float(amt_raw) if amt_raw else row["bet_dollars"]
+        logged.append({
+            "date": today,
+            "player": row["player"],
+            "market": row.get("market", ""),
+            "line": row["line"],
+            "side": row["side"],
+            "odds": row["odds"],
+            "bookmaker": row.get("bookmaker", ""),
+            "edge_pct": row["edge_pct"],
+            "suggested_$": row["bet_dollars"],
+            "entered_$": entered,
+            "result": "",  # fill in later: WIN / LOSS / PUSH
+        })
+
+    if not logged:
+        return
+
+    new_df = pd.DataFrame(logged)
+    if TRACKER_PATH.exists():
+        existing = pd.read_csv(TRACKER_PATH)
+        combined = pd.concat([existing, new_df], ignore_index=True)
+    else:
+        combined = new_df
+    combined.to_csv(TRACKER_PATH, index=False)
+    print(f"\n[tracker] {len(logged)} bet(s) logged → {TRACKER_PATH}")
+    print("  Update the 'result' column with WIN / LOSS / PUSH after games settle.")
+
+
 def format_output(df: pd.DataFrame) -> str:
     """Format bets DataFrame as a readable table."""
     if df.empty:
@@ -456,5 +536,19 @@ if __name__ == "__main__":
         print(f"\nTotal allocated: ${total_bet:.2f} / ${args.bankroll:.2f} ({total_bet/args.bankroll*100:.1f}%)")
         print(f"Bets flagged: {len(bets)}")
         print(f"\nResults saved to: results/bets_{date.today().isoformat()}.csv")
+
+        # Show arbitrage opportunities if any exist
+        try:
+            from odds import get_arbitrage_opportunities
+            arb_df = get_arbitrage_opportunities()
+            if not arb_df.empty:
+                print("\n" + "=" * 90)
+                print("ARBITRAGE OPPORTUNITIES (bet both sides across books)")
+                print("=" * 90)
+                print(arb_df.to_string(index=False))
+        except Exception:
+            pass
+
+        prompt_and_log_bets(bets)
 
     print("\n[screener.py] Done.")

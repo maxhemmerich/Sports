@@ -30,6 +30,13 @@ PREFERRED_BOOKS = {"pinnacle", "bet365"}
 REGIONS = "us"          # free tier: us region has player props coverage
 MARKETS = "player_points,player_rebounds,player_assists"
 
+# ── SharpAPI config (optional) ────────────────────────────────────────────────
+# SharpAPI provides Pinnacle + bet365 lines with better coverage than Odds API.
+# Set SHARP_API_KEY in your .env to enable. Falls back to Odds API if not set.
+# Docs: check your SharpAPI provider's documentation for endpoint format.
+SHARP_API_KEY = os.getenv("SHARP_API_KEY")
+SHARP_BASE_URL = os.getenv("SHARP_BASE_URL", "")  # e.g. "https://api.sharpapi.io/v1"
+
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 
@@ -92,7 +99,8 @@ def fetch_today_events() -> list[dict]:
 
 def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
     """
-    Fetch player_points props for a single event from Pinnacle + bet365.
+    Fetch player prop lines for a single event.
+    Tries SharpAPI first (better Pinnacle/bet365 coverage) then falls back to Odds API.
     Returns raw bookmaker data list.
     """
     mkt_key = MARKETS.replace(",", "_")
@@ -100,6 +108,15 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
     if cache.exists():
         with open(cache) as f:
             return json.load(f)
+
+    # Try SharpAPI if configured
+    if SHARP_API_KEY and SHARP_BASE_URL:
+        sharp_books = _fetch_sharp_props_nba()
+        if sharp_books:
+            print(f"    [sharp] Using SharpAPI data ({len(sharp_books)} books)")
+            with open(cache, "w") as f:
+                json.dump(sharp_books, f, indent=2)
+            return sharp_books
 
     time.sleep(REQUEST_DELAY)
     data = _get(
@@ -242,6 +259,170 @@ def implied_probability(american: float) -> float:
     """Implied win probability from American odds (no vig removed)."""
     dec = american_to_decimal(american)
     return 1 / dec
+
+
+def _parse_props_all_books(bookmakers: list[dict]) -> pd.DataFrame:
+    """
+    Like parse_props but keeps every book's line — used for arbitrage detection.
+    Returns columns: player_name, market, line, over_price, under_price, bookmaker
+    """
+    rows = []
+    for bk in bookmakers:
+        bk_name = bk.get("key", "")
+        for market in bk.get("markets", []):
+            mkt_key = market.get("key", "")
+            for outcome in market.get("outcomes", []):
+                name = outcome.get("description") or outcome.get("name", "")
+                side = outcome.get("name", "")
+                point = outcome.get("point")
+                price = outcome.get("price")
+                rows.append({
+                    "player_name": name,
+                    "market": mkt_key,
+                    "side": side,
+                    "line": point,
+                    "price": price,
+                    "bookmaker": bk_name,
+                })
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    over = df[df["side"].str.lower() == "over"].rename(columns={"price": "over_price"})
+    under = df[df["side"].str.lower() == "under"].rename(columns={"price": "under_price"})
+    return pd.merge(
+        over[["player_name", "market", "line", "over_price", "bookmaker"]],
+        under[["player_name", "market", "line", "under_price", "bookmaker"]],
+        on=["player_name", "market", "line", "bookmaker"],
+        how="outer",
+    )
+
+
+def detect_arbitrage(all_books_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Find arbitrage opportunities between Pinnacle and bet365.
+
+    Arb exists when:
+        implied_prob(over @ book_A) + implied_prob(under @ book_B) < 1.0
+
+    The arb_pct is the guaranteed profit as a % of total stake.
+    Returns rows sorted by arb_pct descending.
+    """
+    if all_books_df.empty:
+        return pd.DataFrame()
+
+    pin = all_books_df[all_books_df["bookmaker"] == "pinnacle"]
+    b365 = all_books_df[all_books_df["bookmaker"] == "bet365"]
+
+    if pin.empty or b365.empty:
+        return pd.DataFrame()
+
+    key_cols = ["player_name", "market", "line"]
+    pin_indexed = pin.set_index(key_cols)
+    b365_indexed = b365.set_index(key_cols)
+    common_keys = pin_indexed.index.intersection(b365_indexed.index)
+
+    arb_rows = []
+    for key in common_keys:
+        p_row = pin_indexed.loc[key]
+        b_row = b365_indexed.loc[key]
+
+        pin_over = p_row.get("over_price")
+        pin_under = p_row.get("under_price")
+        b365_over = b_row.get("over_price")
+        b365_under = b_row.get("under_price")
+
+        combos = []
+        if pd.notna(pin_over) and pd.notna(b365_under):
+            combos.append(("OVER", "pinnacle", float(pin_over), "UNDER", "bet365", float(b365_under)))
+        if pd.notna(b365_over) and pd.notna(pin_under):
+            combos.append(("OVER", "bet365", float(b365_over), "UNDER", "pinnacle", float(pin_under)))
+
+        for side1, bk1, price1, side2, bk2, price2 in combos:
+            p1 = implied_probability(price1)
+            p2 = implied_probability(price2)
+            total_implied = p1 + p2
+            if total_implied < 1.0:
+                arb_pct = round((1 - total_implied) * 100, 2)
+                player, market, line = key
+                arb_rows.append({
+                    "player": player,
+                    "market": market.replace("player_", ""),
+                    "line": line,
+                    "leg1": f"{side1} @ {bk1} ({int(price1):+d})",
+                    "leg2": f"{side2} @ {bk2} ({int(price2):+d})",
+                    "arb_%": arb_pct,
+                })
+
+    if not arb_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(arb_rows).sort_values("arb_%", ascending=False).reset_index(drop=True)
+
+
+def _fetch_sharp_props_nba() -> list[dict]:
+    """
+    Fetch NBA player props from SharpAPI (Pinnacle + bet365 specialist).
+
+    Set SHARP_API_KEY and SHARP_BASE_URL in your .env to enable.
+    This is a stub — update the endpoint/params to match your SharpAPI provider.
+
+    Expected return format: same bookmakers list as Odds API
+        [{"key": "pinnacle", "markets": [{"key": "player_points", "outcomes": [...]}]}]
+    """
+    if not SHARP_API_KEY or not SHARP_BASE_URL:
+        return []
+
+    try:
+        today = date.today().isoformat()
+        resp = requests.get(
+            f"{SHARP_BASE_URL}/nba/props",
+            params={"date": today, "markets": MARKETS, "books": "pinnacle,bet365"},
+            headers={"Authorization": f"Bearer {SHARP_API_KEY}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # TODO: transform data to match Odds API bookmakers format if needed
+        return data.get("bookmakers", data) if isinstance(data, dict) else data
+    except Exception as e:
+        print(f"  [sharp] SharpAPI fetch failed: {e} — falling back to Odds API")
+        return []
+
+
+def get_arbitrage_opportunities() -> pd.DataFrame:
+    """
+    Return today's arbitrage opportunities between Pinnacle and bet365.
+    Reads from cached props files so no extra API calls are made.
+    """
+    today = date.today().isoformat()
+    events_cache = DATA_DIR / f"events_{today}.json"
+    if not events_cache.exists():
+        return pd.DataFrame()
+
+    with open(events_cache) as f:
+        events = json.load(f)
+
+    all_frames = []
+    mkt_key = MARKETS.replace(",", "_")
+    for ev in events:
+        event_id = ev["id"]
+        commence = ev.get("commence_time", today)
+        ev_date = commence[:10]
+        cache = DATA_DIR / f"props_{event_id}_{ev_date}_{mkt_key}.json"
+        if not cache.exists():
+            continue
+        with open(cache) as f:
+            bookmakers = json.load(f)
+        all_books = _parse_props_all_books(bookmakers)
+        if not all_books.empty:
+            all_frames.append(all_books)
+
+    if not all_frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(all_frames, ignore_index=True)
+    return detect_arbitrage(combined)
 
 
 def best_line(df: pd.DataFrame, player: str, side: str) -> tuple[float | None, str | None]:

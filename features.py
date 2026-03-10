@@ -2,9 +2,9 @@
 features.py — Build feature matrix for each player-game.
 
 Features:
-  - Rolling avg points (last 5, 10, 20 games)
+  - Rolling avg points/reb/ast (last 5, 10, 20 games)
   - Opponent defensive rating (avg pts allowed to all players)
-  - Pace (team pace proxy from nba_api)
+  - Opponent team pace (avg team FGA per game — higher = faster pace)
   - Days rest since last game
   - Back-to-back flag
   - Home / Away indicator
@@ -181,8 +181,8 @@ def add_defense_features(df: pd.DataFrame, def_lookup: pd.DataFrame) -> pd.DataF
 
 def add_pace_proxy(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Proxy pace as team's avg FGA per game in the rolling window.
-    Higher FGA ~ faster pace ~ more scoring opportunities.
+    Proxy pace as player's rolling FGA per game (personal volume indicator).
+    Higher FGA ~ more usage ~ more scoring opportunities.
     """
     df = df.sort_values(["player_id", "game_date"]).copy()
     if "fga" in df.columns:
@@ -195,11 +195,75 @@ def add_pace_proxy(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def build_pace_lookup() -> pd.DataFrame:
+    """
+    Compute each team's average FGA per game across all loaded seasons.
+    FGA per game is a reliable pace proxy — fast teams attempt more shots.
+    Returns DataFrame with columns: team_abbreviation, team_avg_fga
+    """
+    out_path = DATA_DIR / "team_pace.csv"
+    if out_path.exists():
+        return pd.read_csv(out_path)
+
+    df = load_gamelogs()
+    required = {"fga", "team_abbreviation", "game_id"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    # Sum all players' FGA per team per game, then average across games
+    team_game = (
+        df.groupby(["team_abbreviation", "game_id"])["fga"]
+        .sum()
+        .reset_index()
+    )
+    pace = (
+        team_game.groupby("team_abbreviation")["fga"]
+        .mean()
+        .reset_index()
+        .rename(columns={"fga": "team_avg_fga"})
+    )
+    pace.to_csv(out_path, index=False)
+    print(f"[features] Team pace lookup → {out_path}")
+    return pace
+
+
+def _get_opp_abbr(matchup: str, team_abbr: str) -> str:
+    """Extract opponent team abbreviation from matchup string."""
+    for sep in [" vs. ", " @ "]:
+        if sep in matchup:
+            left, right = matchup.split(sep, 1)
+            left, right = left.strip(), right.strip()
+            return right if left == team_abbr else left
+    return ""
+
+
+def add_opp_pace(df: pd.DataFrame, pace_lookup: pd.DataFrame) -> pd.DataFrame:
+    """Merge opponent team's avg FGA (pace proxy) into each player-game row."""
+    if pace_lookup.empty or "matchup" not in df.columns:
+        df["opp_team_pace"] = 85.0
+        return df
+
+    df = df.copy()
+    df["opp_abbr"] = df.apply(
+        lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
+        axis=1,
+    )
+    df = df.merge(
+        pace_lookup.rename(columns={"team_abbreviation": "opp_abbr", "team_avg_fga": "opp_team_pace"}),
+        on="opp_abbr",
+        how="left",
+    )
+    df["opp_team_pace"] = df["opp_team_pace"].fillna(85.0)
+    df = df.drop(columns=["opp_abbr"], errors="ignore")
+    return df
+
+
 FEATURE_COLS = [
     "roll_pts_5",
     "roll_pts_10",
     "roll_pts_20",
     "opp_avg_pts_allowed",
+    "opp_team_pace",
     "days_rest",
     "back_to_back",
     "is_home",
@@ -212,6 +276,7 @@ FEATURE_COLS_REB = [
     "roll_reb_10",
     "roll_reb_20",
     "opp_avg_pts_allowed",
+    "opp_team_pace",
     "days_rest",
     "back_to_back",
     "is_home",
@@ -224,6 +289,7 @@ FEATURE_COLS_AST = [
     "roll_ast_10",
     "roll_ast_20",
     "opp_avg_pts_allowed",
+    "opp_team_pace",
     "days_rest",
     "back_to_back",
     "is_home",
@@ -260,6 +326,7 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
 
     print("[features] Building feature matrix ...")
     def_lookup = build_defense_lookup()
+    pace_lookup = build_pace_lookup()
 
     df = add_rolling_features(df)
     df = add_rest_features(df)
@@ -267,6 +334,7 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     df = add_travel_distance(df)
     df = add_pace_proxy(df)
     df = add_defense_features(df, def_lookup)
+    df = add_opp_pace(df, pace_lookup)
 
     # Drop rows without enough history (first few games per player)
     df = df.dropna(subset=["roll_pts_5", TARGET_COL])
@@ -359,12 +427,21 @@ def build_live_features(
     if "fga" in player_df.columns:
         roll_fga_10 = float(player_df["fga"].tail(10).mean())
 
+    # Opponent team pace (avg FGA per game — higher = faster pace = more possessions)
+    pace_lookup = build_pace_lookup()
+    opp_team_pace = 85.0  # league avg fallback
+    if not pace_lookup.empty and "team_abbreviation" in pace_lookup.columns:
+        opp_row = pace_lookup[pace_lookup["team_abbreviation"] == opponent_team_abbr]
+        if not opp_row.empty:
+            opp_team_pace = float(opp_row["team_avg_fga"].iloc[0])
+
     prefix = stat_col  # pts / reb / ast
     return {
         f"roll_{prefix}_5":    roll5,
         f"roll_{prefix}_10":   roll10,
         f"roll_{prefix}_20":   roll20,
         "opp_avg_pts_allowed": opp_avg_pts_allowed,
+        "opp_team_pace":       opp_team_pace,
         "days_rest":           min(days_rest, 14),
         "back_to_back":        back_to_back,
         "is_home":             int(is_home),
