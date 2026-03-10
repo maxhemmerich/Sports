@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from data import load_gamelogs
-from features import build_live_features, FEATURE_COLS
+from features import build_live_features, MARKET_CONFIG
 from model import load_model, predict
 from odds import get_today_lines, american_to_decimal, implied_probability
 
@@ -135,35 +135,28 @@ def screen_player(
     df_history: pd.DataFrame,
     model,
     def_lookup=None,
+    target: str = "pts",
+    market: str = "player_points",
 ) -> dict | None:
     """
     Run the full screening pipeline for one player-line.
     Returns a result dict or None if not flagged.
     """
-    # Determine if the player's team is home or away
-    # We need player's team; look up in history
     player_rows = df_history[df_history["player_name"] == player_name]
     if player_rows.empty:
         return None
 
     team_abbr = player_rows.sort_values("game_date").iloc[-1].get("team_abbreviation", "")
 
-    # Determine home/away by checking if player's team abbreviation
-    # appears in the home_team full name (e.g. "LAL" in "Los Angeles Lakers")
-    # Also try matching the away team.
     home_upper = home_team.upper()
-    away_upper = away_team.upper()
     abbr_upper = team_abbr.upper()
-    # Match abbreviation against team name words (e.g. "GSW" vs "Golden State Warriors")
     is_home_approx = abbr_upper in home_upper or any(
         abbr_upper == word[:len(abbr_upper)] for word in home_upper.split()
     )
 
-    # Opponent abbreviation: the team the player is NOT on
     opp_abbr = away_team[:3].upper() if is_home_approx else home_team[:3].upper()
     game_date = commence_time[:10] if commence_time else date.today().isoformat()
 
-    # Build features
     feats = build_live_features(
         player_name=player_name,
         opponent_team_abbr=opp_abbr,
@@ -171,13 +164,13 @@ def screen_player(
         game_date=game_date,
         df_history=df_history,
         def_lookup=def_lookup,
+        target=target,
     )
     if not feats:
         return None
 
-    # Predict
     try:
-        prediction = predict(feats, model)
+        prediction = predict(feats, model, target=target)
     except Exception:
         return None
 
@@ -185,7 +178,6 @@ def screen_player(
     if abs(diff) < MIN_LINE_DIFF:
         return None
 
-    # Edge calculation
     if pd.isna(over_price) or pd.isna(under_price):
         return None
 
@@ -197,7 +189,6 @@ def screen_player(
     try:
         side, win_prob, edge_pct = edge_from_prediction(prediction, line, p_over_fair, p_under_fair)
     except ImportError:
-        # scipy not available — fallback to simple diff-based edge
         side = "OVER" if diff > 0 else "UNDER"
         win_prob = 0.55 if abs(diff) > 2 else 0.52
         edge_pct = (win_prob - 0.5) * 100
@@ -205,16 +196,15 @@ def screen_player(
     if edge_pct < MIN_EDGE_PCT:
         return None
 
-    # Best odds for chosen side
     price_col = float(over_price) if side == "OVER" else float(under_price)
     dec_odds = american_to_decimal(price_col)
 
-    # Kelly sizing
     kf = kelly_fraction(win_prob, dec_odds)
     bet_dollars = round(kf * BANKROLL, 2)
 
     return {
         "player": player_name,
+        "market": market,
         "line": line,
         "prediction": round(prediction, 1),
         "edge_pct": round(edge_pct, 1),
@@ -251,46 +241,45 @@ def run_screener(
     print("=== NBA Props Screener ===")
     print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts")
 
-    # Load model
-    try:
-        model = load_model()
-        print("[screener] Model loaded.")
-    except FileNotFoundError:
-        print("[screener] model.pkl not found — training now ...")
-        from model import train, save_model, load_training_data
-        X, y = load_training_data()
-        model = train(X, y)
-        save_model(model)
+    # Load models for each market (auto-train if missing)
+    from model import _train_target, load_training_data as _ltd, train as _train, save_model as _save
+    models = {}
+    for market, (feat_cols, target) in MARKET_CONFIG.items():
+        try:
+            models[market] = load_model(target=target)
+        except FileNotFoundError:
+            print(f"[screener] model_{target}.pkl not found — training now ...")
+            _train_target(target, do_eval=False, retrain=False)
+            models[market] = load_model(target=target)
+    print(f"[screener] Models loaded: {list(models.keys())}")
 
-    # Load today's lines
+    # Load today's lines (all markets)
     lines_df = get_today_lines()
     if lines_df.empty:
         print("[screener] No lines available for today. Exiting.")
         return pd.DataFrame()
 
-    # Keep only player_points market
+    # Filter to supported markets only
+    supported_markets = set(MARKET_CONFIG.keys())
     if "market" in lines_df.columns:
-        lines_df = lines_df[lines_df["market"] == "player_points"]
+        lines_df = lines_df[lines_df["market"].isin(supported_markets)]
 
-    print(f"[screener] {len(lines_df)} prop lines to evaluate.")
+    print(f"[screener] {len(lines_df)} prop lines across {lines_df['market'].nunique() if 'market' in lines_df.columns else 1} market(s).")
 
-    # Load all shared data once — avoids reloading per-player
+    # Load all shared data once
     from features import build_defense_lookup
     df_history = load_gamelogs()
     def_lookup = build_defense_lookup()
     print(f"[screener] Data loaded: {len(df_history)} game rows, {len(def_lookup)} defense entries.")
 
     # Build name lookup: normalized → actual NBA name
+    import re
+
     def _norm(name: str) -> str:
-        """Canonical name for fuzzy matching."""
-        # Strip Unicode accents (Dončić → Doncic, Luka Šamanić → Luka Samanic)
         name = unicodedata.normalize("NFD", name)
         name = "".join(c for c in name if unicodedata.category(c) != "Mn")
-        # Remove periods from initials: C.J. → CJ, R.J. → RJ, A.J. → AJ
-        import re
-        name = re.sub(r"\b([A-Z])\.([A-Z])\.", r"\1\2", name)  # X.Y. → XY
-        name = re.sub(r"\b([A-Z])\.", r"\1", name)             # X. → X
-        # Normalise Jr./Sr./II/III suffixes
+        name = re.sub(r"\b([A-Z])\.([A-Z])\.", r"\1\2", name)
+        name = re.sub(r"\b([A-Z])\.", r"\1", name)
         name = re.sub(r"\s+(Jr\.?|Sr\.?|II|III|IV)$", lambda m: " " + m.group(1).rstrip("."), name, flags=re.IGNORECASE)
         return " ".join(name.strip().lower().split())
 
@@ -298,21 +287,23 @@ def run_screener(
     norm_to_nba = {_norm(n): n for n in nba_names}
 
     results = []
-    seen_players = set()  # screen each player once
+    # seen key = (player_raw, market) so same player can have pts + reb + ast
+    seen_keys = set()
     n_no_history = 0
-    predictions_log = []  # for debug output
 
     for _, row in lines_df.iterrows():
         player = row.get("player_name", "")
-        if not player or player in seen_players:
+        market = row.get("market", "player_points")
+        key = (player, market)
+        if not player or key in seen_keys:
             continue
-        seen_players.add(player)
+        seen_keys.add(key)
 
         line = row.get("line")
         if pd.isna(line):
             continue
 
-        # Name resolution: exact → normalized
+        # Name resolution
         if player in norm_to_nba.values():
             nba_player = player
         else:
@@ -328,6 +319,11 @@ def run_screener(
         away_team = row.get("away_team", "")
         commence_time = row.get("commence_time", "")
 
+        _, target = MARKET_CONFIG.get(market, (None, "pts"))
+        model = models.get(market)
+        if model is None:
+            continue
+
         result = screen_player(
             player_name=nba_player,
             line=float(line),
@@ -340,49 +336,52 @@ def run_screener(
             df_history=df_history,
             model=model,
             def_lookup=def_lookup,
+            target=target,
+            market=market,
         )
 
         if result:
             results.append(result)
-            predictions_log.append((nba_player, float(line), result["prediction"], result["edge_pct"], "FLAGGED"))
-        else:
-            # Log for debug: compute prediction anyway to understand rejections
-            predictions_log.append((nba_player, float(line), None, None, "skipped"))
 
-    print(f"[screener] Players screened: {len(seen_players)} | "
+    unique_players = len({k[0] for k in seen_keys})
+    print(f"[screener] Lines evaluated: {len(seen_keys)} | "
+          f"Players matched: {unique_players} | "
           f"No history: {n_no_history} | "
           f"Flagged: {len(results)}")
 
     if debug:
-        # Show top predictions vs lines to diagnose why bets are/aren't flagged
-        from features import build_live_features as _blf
+        from model import predict as _pred
         game_date_str = date.today().isoformat()
         diag_rows = []
         for _, row in lines_df.iterrows():
             p_raw = row.get("player_name", "")
+            mkt = row.get("market", "player_points")
             nba_p = norm_to_nba.get(_norm(p_raw)) if p_raw not in norm_to_nba.values() else p_raw
             if not nba_p:
                 continue
             ln = row.get("line")
             if pd.isna(ln):
                 continue
-            feats = _blf(nba_p, "", False, game_date_str, df_history, def_lookup)
+            _, tgt = MARKET_CONFIG.get(mkt, (None, "pts"))
+            mdl = models.get(mkt)
+            if mdl is None:
+                continue
+            feats = build_live_features(nba_p, "", False, game_date_str, df_history, def_lookup, target=tgt)
             if feats:
-                from model import predict as _pred
-                pred = _pred(feats, model)
+                pred = _pred(feats, mdl, target=tgt)
                 diff = pred - float(ln)
                 o_p = row.get("over_price")
                 u_p = row.get("under_price")
-                diag_rows.append((nba_p, float(ln), round(pred, 1), round(diff, 1),
+                diag_rows.append((nba_p, mkt[-3:].upper(), float(ln), round(pred, 1), round(diff, 1),
                                   "" if pd.isna(o_p) else int(o_p),
                                   "" if pd.isna(u_p) else int(u_p)))
 
         if diag_rows:
             print("\n[DEBUG] Prediction vs Line (all matched players):")
-            print(f"{'Player':<28} {'Line':>6} {'Pred':>6} {'Diff':>6} {'Over':>6} {'Under':>6}")
-            print("-" * 62)
-            for r in sorted(diag_rows, key=lambda x: abs(x[3]), reverse=True)[:20]:
-                print(f"{r[0]:<28} {r[1]:>6.1f} {r[2]:>6.1f} {r[3]:>+6.1f} {str(r[4]):>6} {str(r[5]):>6}")
+            print(f"{'Player':<28} {'Mkt':>4} {'Line':>6} {'Pred':>6} {'Diff':>6} {'Over':>6} {'Under':>6}")
+            print("-" * 68)
+            for r in sorted(diag_rows, key=lambda x: abs(x[4]), reverse=True)[:30]:
+                print(f"{r[0]:<28} {r[1]:>4} {r[2]:>6.1f} {r[3]:>6.1f} {r[4]:>+6.1f} {str(r[5]):>6} {str(r[6]):>6}")
 
     # Show unmatched names
     if n_no_history > 0:
@@ -427,7 +426,7 @@ def format_output(df: pd.DataFrame) -> str:
     display["odds"] = display["odds"].apply(lambda x: f"{int(x):+d}" if not pd.isna(x) else "N/A")
     display["prediction"] = display["prediction"].apply(lambda x: f"{x:.1f}")
 
-    cols = ["player", "line", "prediction", "edge%", "side", "odds", "bookmaker", "kelly%", "bet_$", "game"]
+    cols = ["player", "market", "line", "prediction", "edge%", "side", "odds", "bookmaker", "kelly%", "bet_$", "game"]
     avail = [c for c in cols if c in display.columns]
     return display[avail].to_string(index=False)
 

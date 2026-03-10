@@ -80,15 +80,18 @@ def _team_from_matchup(matchup: str, is_home: bool) -> str:
 
 def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add rolling average points features per player.
+    Add rolling average features (pts, reb, ast) per player.
     Expects df sorted by player_id, game_date.
     """
     df = df.sort_values(["player_id", "game_date"]).copy()
-    for window in [5, 10, 20]:
-        df[f"roll_pts_{window}"] = (
-            df.groupby("player_id")["pts"]
-            .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
-        )
+    for stat in ["pts", "reb", "ast"]:
+        if stat not in df.columns:
+            continue
+        for window in [5, 10, 20]:
+            df[f"roll_{stat}_{window}"] = (
+                df.groupby("player_id")[stat]
+                .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
+            )
     return df
 
 
@@ -204,7 +207,40 @@ FEATURE_COLS = [
     "roll_fga_10",
 ]
 
+FEATURE_COLS_REB = [
+    "roll_reb_5",
+    "roll_reb_10",
+    "roll_reb_20",
+    "opp_avg_pts_allowed",
+    "days_rest",
+    "back_to_back",
+    "is_home",
+    "travel_km",
+    "roll_fga_10",
+]
+
+FEATURE_COLS_AST = [
+    "roll_ast_5",
+    "roll_ast_10",
+    "roll_ast_20",
+    "opp_avg_pts_allowed",
+    "days_rest",
+    "back_to_back",
+    "is_home",
+    "travel_km",
+    "roll_fga_10",
+]
+
 TARGET_COL = "pts"
+TARGET_COL_REB = "reb"
+TARGET_COL_AST = "ast"
+
+# Map market key → (feature_cols, target_col)
+MARKET_CONFIG = {
+    "player_points":   (FEATURE_COLS,     TARGET_COL),
+    "player_rebounds": (FEATURE_COLS_REB, TARGET_COL_REB),
+    "player_assists":  (FEATURE_COLS_AST, TARGET_COL_AST),
+}
 
 
 def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
@@ -246,6 +282,7 @@ def build_live_features(
     game_date: str,
     df_history: pd.DataFrame | None = None,
     def_lookup: pd.DataFrame | None = None,
+    target: str = "pts",
 ) -> dict:
     """
     Build a single feature row for live prediction.
@@ -257,6 +294,7 @@ def build_live_features(
         game_date: ISO date string 'YYYY-MM-DD'
         df_history: pre-loaded game log DataFrame (avoids per-call reload)
         def_lookup: pre-loaded defense lookup DataFrame (avoids per-call reload)
+        target: 'pts', 'reb', or 'ast'
 
     Returns:
         dict mapping feature_col → value
@@ -276,11 +314,14 @@ def build_live_features(
     if player_df.empty:
         return {}
 
-    pts_series = player_df["pts"]
-
-    roll5 = pts_series.tail(5).mean() if len(pts_series) >= 1 else pts_series.mean()
-    roll10 = pts_series.tail(10).mean() if len(pts_series) >= 1 else pts_series.mean()
-    roll20 = pts_series.tail(20).mean() if len(pts_series) >= 1 else pts_series.mean()
+    # Rolling averages for the target stat
+    stat_col = target  # pts / reb / ast
+    if stat_col not in player_df.columns:
+        return {}
+    stat_series = player_df[stat_col]
+    roll5  = float(stat_series.tail(5).mean())
+    roll10 = float(stat_series.tail(10).mean())
+    roll20 = float(stat_series.tail(20).mean())
 
     last_game = player_df.iloc[-1]
     last_date = pd.Timestamp(last_game["game_date"])
@@ -294,7 +335,6 @@ def build_live_features(
         team = last_game["team_abbreviation"]
         prev_venue = TEAM_COORDS.get(team) if prev_is_home else None
         if prev_venue is None:
-            # Try opponent from previous matchup
             opp_abbr = ""
             if "matchup" in last_game:
                 matchup = last_game["matchup"]
@@ -311,15 +351,7 @@ def build_live_features(
     # Opponent defense
     opp_avg_pts_allowed = 110.0  # fallback league average
     if not def_lookup.empty and "team_id" in def_lookup.columns:
-        # Map team abbreviation to team_id via the player's history
-        team_map = (
-            df_history[["team_abbreviation", "opponent_team_id"]]
-            .dropna()
-            .drop_duplicates()
-        )
-        # We want the team_id for the opponent abbreviation
-        # This is approximate — use season-averaged defense
-        opp_rows = def_lookup  # fallback: use all
+        opp_rows = def_lookup
         if not opp_rows.empty:
             opp_avg_pts_allowed = float(opp_rows["avg_pts_allowed"].median())
 
@@ -327,16 +359,17 @@ def build_live_features(
     if "fga" in player_df.columns:
         roll_fga_10 = float(player_df["fga"].tail(10).mean())
 
+    prefix = stat_col  # pts / reb / ast
     return {
-        "roll_pts_5": roll5,
-        "roll_pts_10": roll10,
-        "roll_pts_20": roll20,
+        f"roll_{prefix}_5":    roll5,
+        f"roll_{prefix}_10":   roll10,
+        f"roll_{prefix}_20":   roll20,
         "opp_avg_pts_allowed": opp_avg_pts_allowed,
-        "days_rest": min(days_rest, 14),
-        "back_to_back": back_to_back,
-        "is_home": int(is_home),
-        "travel_km": travel_km,
-        "roll_fga_10": roll_fga_10,
+        "days_rest":           min(days_rest, 14),
+        "back_to_back":        back_to_back,
+        "is_home":             int(is_home),
+        "travel_km":           travel_km,
+        "roll_fga_10":         roll_fga_10,
     }
 
 

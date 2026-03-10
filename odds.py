@@ -6,7 +6,7 @@ for the screener.
 Endpoints used:
   GET /v4/sports/basketball_nba/events
   GET /v4/sports/basketball_nba/events/{event_id}/odds
-       ?regions=us&markets=player_points&bookmakers=pinnacle,bet365
+       ?regions=us&markets=player_points,player_rebounds,player_assists
 """
 
 import os
@@ -27,8 +27,8 @@ SPORT = "basketball_nba"
 # The free API tier restricts player props to US books (DraftKings, FanDuel etc).
 # We fetch all available books and prefer PREFERRED_BOOKS if present.
 PREFERRED_BOOKS = {"pinnacle", "bet365"}
-REGIONS = "us"          # free tier: us region has player_points coverage
-MARKETS = "player_points"
+REGIONS = "us"          # free tier: us region has player props coverage
+MARKETS = "player_points,player_rebounds,player_assists"
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
@@ -95,7 +95,8 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
     Fetch player_points props for a single event from Pinnacle + bet365.
     Returns raw bookmaker data list.
     """
-    cache = DATA_DIR / f"props_{event_id}_{event_date}.json"
+    mkt_key = MARKETS.replace(",", "_")
+    cache = DATA_DIR / f"props_{event_id}_{event_date}_{mkt_key}.json"
     if cache.exists():
         with open(cache) as f:
             return json.load(f)
