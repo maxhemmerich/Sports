@@ -24,7 +24,8 @@ API_KEY = os.getenv("ODDS_API_KEY")
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "basketball_nba"
 BOOKMAKERS = "pinnacle,bet365"
-REGIONS = "us"
+# Pinnacle = eu region, bet365 = uk region (neither is in 'us')
+REGIONS = "eu,uk"
 MARKETS = "player_points"
 
 DATA_DIR = Path("data")
@@ -108,6 +109,10 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
         },
     )
     bookmakers = data.get("bookmakers", [])
+    if not bookmakers:
+        # Show which bookmakers the API did return (helps diagnose plan limits)
+        available = [b.get("key") for b in data.get("bookmakers", [])]
+        print(f"    [warn] No Pinnacle/bet365 props. API bookmakers: {available or 'none'}")
     with open(cache, "w") as f:
         json.dump(bookmakers, f, indent=2)
     return bookmakers
