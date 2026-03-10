@@ -35,6 +35,7 @@ BANKROLL = float(os.getenv("BANKROLL", "100"))        # starting bankroll in $
 MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "4"))  # minimum edge % to flag
 MIN_LINE_DIFF = float(os.getenv("MIN_LINE_DIFF", "1.5"))  # minimum |pred - line| pts
 MAX_KELLY_FRACTION = float(os.getenv("MAX_KELLY_FRACTION", "0.05"))  # cap at 5% per bet
+MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "0.25"))  # max total bankroll % across all bets
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
@@ -231,6 +232,7 @@ def run_screener(
     bankroll: float = BANKROLL,
     min_edge: float = MIN_EDGE_PCT,
     min_diff: float = MIN_LINE_DIFF,
+    debug: bool = False,
 ) -> pd.DataFrame:
     """
     Main screener pipeline.
@@ -244,6 +246,7 @@ def run_screener(
     BANKROLL = bankroll
     MIN_EDGE_PCT = min_edge
     MIN_LINE_DIFF = min_diff
+    max_exposure = MAX_TOTAL_EXPOSURE * bankroll
 
     print("=== NBA Props Screener ===")
     print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts")
@@ -350,35 +353,36 @@ def run_screener(
           f"No history: {n_no_history} | "
           f"Flagged: {len(results)}")
 
-    # Show top predictions vs lines to diagnose why bets are/aren't flagged
-    from features import build_live_features as _blf
-    game_date_str = date.today().isoformat()
-    diag_rows = []
-    for _, row in lines_df.iterrows():
-        p_raw = row.get("player_name", "")
-        nba_p = norm_to_nba.get(_norm(p_raw)) if p_raw not in norm_to_nba.values() else p_raw
-        if not nba_p:
-            continue
-        ln = row.get("line")
-        if pd.isna(ln):
-            continue
-        feats = _blf(nba_p, "", False, game_date_str, df_history, def_lookup)
-        if feats:
-            from model import predict as _pred
-            pred = _pred(feats, model)
-            diff = pred - float(ln)
-            o_p = row.get("over_price")
-            u_p = row.get("under_price")
-            diag_rows.append((nba_p, float(ln), round(pred, 1), round(diff, 1),
-                              "" if pd.isna(o_p) else int(o_p),
-                              "" if pd.isna(u_p) else int(u_p)))
+    if debug:
+        # Show top predictions vs lines to diagnose why bets are/aren't flagged
+        from features import build_live_features as _blf
+        game_date_str = date.today().isoformat()
+        diag_rows = []
+        for _, row in lines_df.iterrows():
+            p_raw = row.get("player_name", "")
+            nba_p = norm_to_nba.get(_norm(p_raw)) if p_raw not in norm_to_nba.values() else p_raw
+            if not nba_p:
+                continue
+            ln = row.get("line")
+            if pd.isna(ln):
+                continue
+            feats = _blf(nba_p, "", False, game_date_str, df_history, def_lookup)
+            if feats:
+                from model import predict as _pred
+                pred = _pred(feats, model)
+                diff = pred - float(ln)
+                o_p = row.get("over_price")
+                u_p = row.get("under_price")
+                diag_rows.append((nba_p, float(ln), round(pred, 1), round(diff, 1),
+                                  "" if pd.isna(o_p) else int(o_p),
+                                  "" if pd.isna(u_p) else int(u_p)))
 
-    if diag_rows:
-        print("\n[DEBUG] Prediction vs Line (all matched players):")
-        print(f"{'Player':<28} {'Line':>6} {'Pred':>6} {'Diff':>6} {'Over':>6} {'Under':>6}")
-        print("-" * 62)
-        for r in sorted(diag_rows, key=lambda x: abs(x[3]), reverse=True)[:20]:
-            print(f"{r[0]:<28} {r[1]:>6.1f} {r[2]:>6.1f} {r[3]:>+6.1f} {str(r[4]):>6} {str(r[5]):>6}")
+        if diag_rows:
+            print("\n[DEBUG] Prediction vs Line (all matched players):")
+            print(f"{'Player':<28} {'Line':>6} {'Pred':>6} {'Diff':>6} {'Over':>6} {'Under':>6}")
+            print("-" * 62)
+            for r in sorted(diag_rows, key=lambda x: abs(x[3]), reverse=True)[:20]:
+                print(f"{r[0]:<28} {r[1]:>6.1f} {r[2]:>6.1f} {r[3]:>+6.1f} {str(r[4]):>6} {str(r[5]):>6}")
 
     # Show unmatched names
     if n_no_history > 0:
@@ -394,6 +398,14 @@ def run_screener(
         return pd.DataFrame()
 
     bets_df = pd.DataFrame(results).sort_values("edge_pct", ascending=False).reset_index(drop=True)
+
+    # Scale bets proportionally if total allocation exceeds MAX_TOTAL_EXPOSURE
+    total_raw = bets_df["bet_dollars"].sum()
+    if total_raw > max_exposure:
+        scale = max_exposure / total_raw
+        bets_df["bet_dollars"] = (bets_df["bet_dollars"] * scale).round(2)
+        bets_df["kelly_pct"] = (bets_df["kelly_pct"] * scale).round(3)
+        print(f"[screener] Scaled bets by {scale:.3f}x — total capped at ${max_exposure:.2f} ({MAX_TOTAL_EXPOSURE*100:.0f}% of bankroll)")
 
     # Save results
     today = date.today().isoformat()
@@ -425,12 +437,14 @@ if __name__ == "__main__":
     parser.add_argument("--bankroll", type=float, default=BANKROLL, help="Current bankroll in $")
     parser.add_argument("--min-edge", type=float, default=MIN_EDGE_PCT, help="Minimum edge %% to flag")
     parser.add_argument("--min-diff", type=float, default=MIN_LINE_DIFF, help="Min |prediction - line| pts")
+    parser.add_argument("--debug", action="store_true", help="Print prediction vs line debug table")
     args = parser.parse_args()
 
     bets = run_screener(
         bankroll=args.bankroll,
         min_edge=args.min_edge,
         min_diff=args.min_diff,
+        debug=args.debug,
     )
 
     print("\n" + "=" * 90)
