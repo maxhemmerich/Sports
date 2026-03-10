@@ -16,7 +16,26 @@ DATA_DIR.mkdir(exist_ok=True)
 SEASONS = ["2022-23", "2023-24"]
 SEASON_TYPE = "Regular Season"
 # nba_api rate limiting — be respectful
-REQUEST_DELAY = 0.6  # seconds between requests
+REQUEST_DELAY = 1.0  # seconds between requests
+
+# stats.nba.com blocks requests without browser-like headers
+NBA_HEADERS = {
+    "Host": "stats.nba.com",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/123.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "x-nba-stats-origin": "stats",
+    "x-nba-stats-token": "true",
+    "Referer": "https://www.nba.com/",
+    "Origin": "https://www.nba.com",
+    "Connection": "keep-alive",
+}
+NBA_TIMEOUT = 120  # seconds — bulk season endpoint is slow
 
 
 def get_all_active_players() -> pd.DataFrame:
@@ -40,6 +59,8 @@ def fetch_player_gamelogs(season: str) -> pd.DataFrame:
     logs = playergamelogs.PlayerGameLogs(
         season_nullable=season,
         season_type_nullable=SEASON_TYPE,
+        headers=NBA_HEADERS,
+        timeout=NBA_TIMEOUT,
     )
     df = logs.get_data_frames()[0]
 
