@@ -130,6 +130,7 @@ def fetch_season_gamelogs_league(season: str) -> pd.DataFrame:
 
     # Map leaguegamelog columns to our standard names where they differ
     rename = {
+        "game_date": "game_date",
         "team_id": "team_id",
         "team_abbreviation": "team_abbreviation",
         "player_id": "player_id",
