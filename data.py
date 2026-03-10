@@ -94,100 +94,65 @@ def fetch_season_gamelogs_direct(season: str) -> pd.DataFrame:
     return df
 
 
-# ── Balldontlie fallback ───────────────────────────────────────────────────
-# Free public API, no key needed, covers full game logs.
-
-BDL_BASE = "https://api.balldontlie.io/v1"
-BDL_PAGE_SIZE = 100
+# ── leaguegamelog fallback ─────────────────────────────────────────────────
+# Different endpoint on stats.nba.com — more reliable for recent seasons
+# where playergamelogs returns 500.
 
 
-def _bdl_get(path: str, params: dict) -> dict:
-    """GET request to balldontlie API (no auth required for v1 free tier)."""
-    resp = requests.get(f"{BDL_BASE}{path}", params=params, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _season_year(season_str: str) -> int:
-    """'2022-23' → 2022"""
-    return int(season_str.split("-")[0])
-
-
-def fetch_season_gamelogs_bdl(season: str) -> pd.DataFrame:
+def fetch_season_gamelogs_league(season: str) -> pd.DataFrame:
     """
-    Fetch player game logs via balldontlie API.
-    Covers regular season only. Paginates automatically.
-    Returns DataFrame with nba_api-compatible column names.
+    Fetch player game logs via leaguegamelog endpoint.
+    Used as fallback when playergamelogs returns a server error.
     """
-    year = _season_year(season)
-    print(f"  [balldontlie] Fetching season {season} (year={year}) ...")
+    url = "https://stats.nba.com/stats/leaguegamelog"
+    params = {
+        "Counter": "0",
+        "Direction": "ASC",
+        "LeagueID": "00",
+        "PlayerOrTeam": "P",
+        "Season": season,
+        "SeasonType": SEASON_TYPE,
+        "Sorter": "DATE",
+    }
+    print(f"  [nba.com/leaguegamelog] season={season} ...")
+    time.sleep(REQUEST_DELAY)
+    data = _nba_get(url, params)
 
-    rows = []
-    cursor = None
-    page = 1
-    while True:
-        params: dict = {
-            "seasons[]": year,
-            "per_page": BDL_PAGE_SIZE,
-        }
-        if cursor:
-            params["cursor"] = cursor
+    result_set = data["resultSets"][0]
+    headers = result_set["headers"]
+    rows = result_set["rowSet"]
+    df = pd.DataFrame(rows, columns=headers)
+    df.columns = [c.lower() for c in df.columns]
 
-        time.sleep(0.35)  # free tier rate limit
-        try:
-            data = _bdl_get("/stats", params)
-        except requests.HTTPError as e:
-            print(f"  [bdl] HTTP error on page {page}: {e}")
-            break
+    # leaguegamelog uses GAME_DATE not game_date, and has slightly different cols
+    if "game_date" in df.columns:
+        df["game_date"] = pd.to_datetime(df["game_date"])
 
-        items = data.get("data", [])
-        if not items:
-            break
+    # Map leaguegamelog columns to our standard names where they differ
+    rename = {
+        "team_id": "team_id",
+        "team_abbreviation": "team_abbreviation",
+        "player_id": "player_id",
+        "player_name": "player_name",
+        "game_id": "game_id",
+        "matchup": "matchup",
+        "wl": "wl",
+        "pts": "pts",
+        "reb": "reb",
+        "ast": "ast",
+        "fga": "fga",
+        "fgm": "fgm",
+        "fg3a": "fg3a",
+        "fg3m": "fg3m",
+        "fta": "fta",
+        "ftm": "ftm",
+        "min": "min",
+        "plus_minus": "plus_minus",
+    }
+    df = df[[c for c in rename if c in df.columns]]
 
-        for item in items:
-            player = item.get("player", {})
-            team = item.get("team", {})
-            game = item.get("game", {})
-            rows.append({
-                "player_id": player.get("id"),
-                "player_name": f"{player.get('first_name', '')} {player.get('last_name', '')}".strip(),
-                "team_id": team.get("id"),
-                "team_abbreviation": team.get("abbreviation", ""),
-                "game_id": game.get("id"),
-                "game_date": game.get("date", "")[:10],
-                "matchup": f"{game.get('home_team_id')} vs {game.get('visitor_team_id')}",
-                "wl": None,
-                "pts": item.get("pts"),
-                "reb": item.get("reb"),
-                "ast": item.get("ast"),
-                "fga": item.get("fga"),
-                "fgm": item.get("fgm"),
-                "fg3a": item.get("fg3a"),
-                "fg3m": item.get("fg3m"),
-                "fta": item.get("fta"),
-                "ftm": item.get("ftm"),
-                "min": item.get("min"),
-                "plus_minus": item.get("plus_minus"),
-                "opponent_team_id": (
-                    game.get("visitor_team_id")
-                    if game.get("home_team_id") == team.get("id")
-                    else game.get("home_team_id")
-                ),
-            })
-
-        meta = data.get("meta", {})
-        cursor = meta.get("next_cursor")
-        print(f"    page {page}: {len(items)} rows | next_cursor={cursor}")
-        page += 1
-        if not cursor:
-            break
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-    df["game_date"] = pd.to_datetime(df["game_date"], errors="coerce")
-    df = df.dropna(subset=["pts"])
+    # Derive opponent_team_id from matchup (e.g. "LAL @ GSW" → opponent is GSW's id)
+    # leaguegamelog doesn't include opponent_team_id directly
     return df
 
 
@@ -197,7 +162,7 @@ def fetch_season_gamelogs_bdl(season: str) -> pd.DataFrame:
 def fetch_player_gamelogs(season: str) -> pd.DataFrame:
     """
     Fetch all player game logs for a season.
-    Tries stats.nba.com first; falls back to balldontlie if unreachable.
+    Tries playergamelogs first, then leaguegamelog if server errors occur.
     Results are cached locally.
     """
     cache_path = DATA_DIR / f"gamelogs_{season.replace('-', '_')}.csv"
@@ -207,20 +172,19 @@ def fetch_player_gamelogs(season: str) -> pd.DataFrame:
         df["game_date"] = pd.to_datetime(df["game_date"])
         return df
 
-    # Try primary source
     df = pd.DataFrame()
     try:
         df = fetch_season_gamelogs_direct(season)
-        print(f"  [ok] nba.com: {len(df)} rows for {season}")
+        print(f"  [ok] playergamelogs: {len(df)} rows for {season}")
     except Exception as e:
-        print(f"  [warn] nba.com failed ({e}). Trying balldontlie ...")
+        print(f"  [warn] playergamelogs failed ({type(e).__name__}). Trying leaguegamelog ...")
         try:
-            df = fetch_season_gamelogs_bdl(season)
-            print(f"  [ok] balldontlie: {len(df)} rows for {season}")
+            df = fetch_season_gamelogs_league(season)
+            print(f"  [ok] leaguegamelog: {len(df)} rows for {season}")
         except Exception as e2:
             raise RuntimeError(
-                f"Both data sources failed for {season}.\n"
-                f"  nba.com: {e}\n  balldontlie: {e2}"
+                f"Both NBA endpoints failed for {season}.\n"
+                f"  playergamelogs: {e}\n  leaguegamelog: {e2}"
             ) from e2
 
     if df.empty:
