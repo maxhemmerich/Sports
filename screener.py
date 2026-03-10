@@ -144,20 +144,21 @@ def screen_player(
     if player_rows.empty:
         return None
 
-    team_abbr = player_rows.iloc[-1].get("team_abbreviation", "")
+    team_abbr = player_rows.sort_values("game_date").iloc[-1].get("team_abbreviation", "")
 
-    # Is the player's team the home team?
-    is_home = home_team.upper() in (team_abbr.upper(), "")  # rough match
-    # Refine using full team names from history where possible
-    last_matchup = player_rows.sort_values("game_date").iloc[-1].get("matchup", "")
-    if "@" in last_matchup:
-        # e.g. "LAL @ GSW" — player is away
-        is_home_approx = False
-    else:
-        is_home_approx = True
+    # Determine home/away by checking if player's team abbreviation
+    # appears in the home_team full name (e.g. "LAL" in "Los Angeles Lakers")
+    # Also try matching the away team.
+    home_upper = home_team.upper()
+    away_upper = away_team.upper()
+    abbr_upper = team_abbr.upper()
+    # Match abbreviation against team name words (e.g. "GSW" vs "Golden State Warriors")
+    is_home_approx = abbr_upper in home_upper or any(
+        abbr_upper == word[:len(abbr_upper)] for word in home_upper.split()
+    )
 
-    # Opponent abbreviation
-    opp_abbr = away_team[:3].upper() if is_home else home_team[:3].upper()
+    # Opponent abbreviation: the team the player is NOT on
+    opp_abbr = away_team[:3].upper() if is_home_approx else home_team[:3].upper()
     game_date = commence_time[:10] if commence_time else date.today().isoformat()
 
     # Build features
@@ -275,17 +276,33 @@ def run_screener(
     def_lookup = build_defense_lookup()
     print(f"[screener] Data loaded: {len(df_history)} game rows, {len(def_lookup)} defense entries.")
 
+    # Build a fast name lookup set from history
+    known_players = set(df_history["player_name"].unique())
+
     results = []
-    seen_players = set()  # screen each player once (best available line)
+    seen_players = set()  # screen each player once
+    n_no_history = 0
+    n_small_diff = 0
+    n_low_edge = 0
 
     for _, row in lines_df.iterrows():
         player = row.get("player_name", "")
         if not player or player in seen_players:
             continue
+        seen_players.add(player)  # always mark seen regardless of result
 
         line = row.get("line")
         if pd.isna(line):
             continue
+
+        # Fast name-match check with fuzzy fallback
+        if player not in known_players:
+            # Try simple normalisation (strip extra spaces, title-case)
+            candidate = " ".join(player.strip().split())
+            if candidate not in known_players:
+                n_no_history += 1
+                continue
+            player = candidate  # use normalised name
 
         over_price = row.get("over_price")
         under_price = row.get("under_price")
@@ -310,7 +327,22 @@ def run_screener(
 
         if result:
             results.append(result)
-            seen_players.add(player)
+        elif result is None:
+            pass  # already counted above or filtered inside screen_player
+
+    print(f"[screener] Players screened: {len(seen_players)} | "
+          f"No history: {n_no_history} | "
+          f"Flagged: {len(results)}")
+
+    # Show unmatched names so user can diagnose API name differences
+    if n_no_history > 0:
+        unmatched = []
+        for _, row in lines_df.iterrows():
+            p = row.get("player_name", "")
+            if p and p not in known_players and " ".join(p.strip().split()) not in known_players:
+                unmatched.append(p)
+        if unmatched:
+            print(f"[screener] Unmatched player names (first 10): {unmatched[:10]}")
 
     if not results:
         print("[screener] No +EV bets found today.")
