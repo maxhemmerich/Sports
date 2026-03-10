@@ -256,10 +256,13 @@ def run_screener(
     print("=== NBA Props Screener ===")
     print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts")
 
-    # Load models for each market (auto-train if missing)
-    from model import _train_target, load_training_data as _ltd, train as _train, save_model as _save
+    # Load models for each market (auto-train if missing or stale)
+    from model import _train_target, load_training_data as _ltd, train as _train, save_model as _save, is_model_stale
     models = {}
     for market, (feat_cols, target) in MARKET_CONFIG.items():
+        if is_model_stale(target):
+            print(f"[screener] model_{target} stale or feature mismatch — retraining ...")
+            _train_target(target, do_eval=False, retrain=True)
         try:
             models[market] = load_model(target=target)
         except FileNotFoundError:

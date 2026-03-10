@@ -14,8 +14,12 @@ Usage:
 import argparse
 import joblib
 import numpy as np
+import os
 import pandas as pd
+import time
 from pathlib import Path
+
+MAX_MODEL_AGE_DAYS = int(os.getenv("MAX_MODEL_AGE_DAYS", "7"))
 
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error
@@ -121,6 +125,30 @@ def evaluate(model: XGBRegressor, X: pd.DataFrame, y: pd.Series, n_splits: int =
 def save_model(model: XGBRegressor, path: Path = MODEL_PATH) -> None:
     joblib.dump(model, path)
     print(f"[model] Saved → {path}")
+
+
+def is_model_stale(target: str = "pts") -> bool:
+    """
+    Return True if the model should be retrained:
+      - .pkl is missing
+      - .pkl is older than MAX_MODEL_AGE_DAYS
+      - trained feature names don't match current FEATURE_COLS for this target
+    """
+    path = _model_path(target)
+    if not path.exists():
+        return True
+    age_days = (time.time() - path.stat().st_mtime) / 86400
+    if age_days > MAX_MODEL_AGE_DAYS:
+        return True
+    try:
+        model = joblib.load(path)
+        trained = set(model.get_booster().feature_names or [])
+        for market, (feat_cols, tgt) in MARKET_CONFIG.items():
+            if tgt == target:
+                return trained != set(feat_cols)
+    except Exception:
+        return True
+    return False
 
 
 def load_model(path: Path | None = None, target: str = "pts") -> XGBRegressor:

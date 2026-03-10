@@ -11,10 +11,14 @@ Features:
   - Travel distance from previous game city (approximate)
 """
 
+import time
+
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from data import load_gamelogs, build_defense_lookup
+
+MAX_CACHE_AGE_DAYS = int(__import__("os").getenv("MAX_CACHE_AGE_DAYS", "7"))
 
 DATA_DIR = Path("data")
 
@@ -92,6 +96,11 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
                 df.groupby("player_id")[stat]
                 .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
             )
+        # Exponentially-weighted mean (span=10 ≈ half-life of ~7 games)
+        df[f"ewm_{stat}_10"] = (
+            df.groupby("player_id")[stat]
+            .transform(lambda x: x.shift(1).ewm(span=10, min_periods=1).mean())
+        )
     return df
 
 
@@ -268,6 +277,8 @@ FEATURE_COLS = [
     "roll_pts_5",
     "roll_pts_10",
     "roll_pts_20",
+    "ewm_pts_10",
+    "vs_opp_pts_avg",
     "opp_avg_pts_allowed",
     "opp_team_pace",
     "days_rest",
@@ -281,6 +292,8 @@ FEATURE_COLS_REB = [
     "roll_reb_5",
     "roll_reb_10",
     "roll_reb_20",
+    "ewm_reb_10",
+    "vs_opp_reb_avg",
     "opp_avg_pts_allowed",
     "opp_team_pace",
     "days_rest",
@@ -294,6 +307,8 @@ FEATURE_COLS_AST = [
     "roll_ast_5",
     "roll_ast_10",
     "roll_ast_20",
+    "ewm_ast_10",
+    "vs_opp_ast_avg",
     "opp_avg_pts_allowed",
     "opp_team_pace",
     "days_rest",
@@ -315,6 +330,32 @@ MARKET_CONFIG = {
 }
 
 
+def add_vs_opponent_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    For each game row, add the player's career avg pts/reb/ast vs that specific
+    opponent using only prior games (no lookahead). Falls back to roll_20 when
+    no prior history exists against that opponent.
+    """
+    df = df.sort_values(["player_id", "game_date"]).copy()
+    df["_opp_abbr"] = df.apply(
+        lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
+        axis=1,
+    )
+    for stat in ["pts", "reb", "ast"]:
+        if stat not in df.columns:
+            continue
+        col = f"vs_opp_{stat}_avg"
+        df[col] = (
+            df.groupby(["player_id", "_opp_abbr"])[stat]
+            .transform(lambda x: x.shift(1).expanding(min_periods=1).mean())
+        )
+        fallback = f"roll_{stat}_20"
+        if fallback in df.columns:
+            df[col] = df[col].fillna(df[fallback])
+    df = df.drop(columns=["_opp_abbr"])
+    return df
+
+
 def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     Full pipeline: load data → add all features → return feature matrix.
@@ -322,10 +363,17 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     cache = DATA_DIR / "feature_matrix.csv"
     if cache.exists():
-        print(f"[features] Loading feature matrix from cache: {cache}")
-        out = pd.read_csv(cache, low_memory=False)
-        out["game_date"] = pd.to_datetime(out["game_date"])
-        return out
+        age_days = (time.time() - cache.stat().st_mtime) / 86400
+        cached_cols = set(pd.read_csv(cache, nrows=0).columns)
+        all_required = set(FEATURE_COLS + FEATURE_COLS_REB + FEATURE_COLS_AST)
+        if age_days <= MAX_CACHE_AGE_DAYS and all_required.issubset(cached_cols):
+            print(f"[features] Loading feature matrix from cache: {cache}")
+            out = pd.read_csv(cache, low_memory=False)
+            out["game_date"] = pd.to_datetime(out["game_date"])
+            return out
+        reason = "stale" if age_days > MAX_CACHE_AGE_DAYS else "missing new feature columns"
+        print(f"[features] Cache {reason} — rebuilding ...")
+        cache.unlink()
 
     if df is None:
         df = load_gamelogs()
@@ -341,6 +389,7 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     df = add_pace_proxy(df)
     df = add_defense_features(df, def_lookup)
     df = add_opp_pace(df, pace_lookup)
+    df = add_vs_opponent_features(df)
 
     # Drop rows without enough history (first few games per player)
     df = df.dropna(subset=["roll_pts_5", TARGET_COL])
@@ -396,6 +445,7 @@ def build_live_features(
     roll5  = float(stat_series.tail(5).mean())
     roll10 = float(stat_series.tail(10).mean())
     roll20 = float(stat_series.tail(20).mean())
+    ewm10  = float(stat_series.ewm(span=10, min_periods=1).mean().iloc[-1])
 
     last_game = player_df.iloc[-1]
     last_date = pd.Timestamp(last_game["game_date"])
@@ -441,11 +491,24 @@ def build_live_features(
         if not opp_row.empty:
             opp_team_pace = float(opp_row["team_avg_fga"].iloc[0])
 
+    # Player's historical avg vs this specific opponent (prior games only)
+    vs_opp_avg = roll20  # fallback: overall rolling mean
+    if opponent_team_abbr and "matchup" in player_df.columns and "team_abbreviation" in player_df.columns:
+        opp_flags = player_df.apply(
+            lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))) == opponent_team_abbr,
+            axis=1,
+        )
+        vs_opp_games = player_df[opp_flags]
+        if not vs_opp_games.empty:
+            vs_opp_avg = float(vs_opp_games[stat_col].mean())
+
     prefix = stat_col  # pts / reb / ast
     return {
         f"roll_{prefix}_5":    roll5,
         f"roll_{prefix}_10":   roll10,
         f"roll_{prefix}_20":   roll20,
+        f"ewm_{prefix}_10":    ewm10,
+        f"vs_opp_{prefix}_avg": vs_opp_avg,
         "opp_avg_pts_allowed": opp_avg_pts_allowed,
         "opp_team_pace":       opp_team_pace,
         "days_rest":           min(days_rest, 14),
