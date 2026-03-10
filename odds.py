@@ -23,9 +23,11 @@ load_dotenv()
 API_KEY = os.getenv("ODDS_API_KEY")
 BASE_URL = "https://api.the-odds-api.com/v4"
 SPORT = "basketball_nba"
-BOOKMAKERS = "pinnacle,bet365"
-# Pinnacle = eu region, bet365 = uk region (neither is in 'us')
-REGIONS = "eu,uk"
+# Preferred books — used for display and best-price selection.
+# The free API tier restricts player props to US books (DraftKings, FanDuel etc).
+# We fetch all available books and prefer PREFERRED_BOOKS if present.
+PREFERRED_BOOKS = {"pinnacle", "bet365"}
+REGIONS = "us"          # free tier: us region has player_points coverage
 MARKETS = "player_points"
 
 DATA_DIR = Path("data")
@@ -104,15 +106,17 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
         params={
             "regions": REGIONS,
             "markets": MARKETS,
-            "bookmakers": BOOKMAKERS,
             "oddsFormat": "american",
+            # No bookmakers filter — take everything the API returns,
+            # then prefer Pinnacle/bet365 in parse_props if available.
         },
     )
     bookmakers = data.get("bookmakers", [])
-    if not bookmakers:
-        # Show which bookmakers the API did return (helps diagnose plan limits)
-        available = [b.get("key") for b in data.get("bookmakers", [])]
-        print(f"    [warn] No Pinnacle/bet365 props. API bookmakers: {available or 'none'}")
+    available = [b.get("key") for b in bookmakers]
+    if available:
+        print(f"    [books] {available}")
+    else:
+        print(f"    [warn] No bookmakers returned for this event")
     with open(cache, "w") as f:
         json.dump(bookmakers, f, indent=2)
     return bookmakers
@@ -121,6 +125,8 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
 def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
     """
     Parse raw bookmaker JSON into a flat DataFrame.
+    Prefers PREFERRED_BOOKS (Pinnacle/bet365) when available;
+    otherwise keeps the best-priced line from any available book.
 
     Returns columns:
         player_name, market, line, over_price, under_price, bookmaker
@@ -132,25 +138,22 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
             mkt_key = market.get("key", "")
             for outcome in market.get("outcomes", []):
                 name = outcome.get("description") or outcome.get("name", "")
-                side = outcome.get("name", "")  # 'Over' or 'Under'
+                side = outcome.get("name", "")
                 point = outcome.get("point")
                 price = outcome.get("price")
-                rows.append(
-                    {
-                        "player_name": name,
-                        "market": mkt_key,
-                        "side": side,
-                        "line": point,
-                        "price": price,
-                        "bookmaker": bk_name,
-                    }
-                )
+                rows.append({
+                    "player_name": name,
+                    "market": mkt_key,
+                    "side": side,
+                    "line": point,
+                    "price": price,
+                    "bookmaker": bk_name,
+                })
 
     if not rows:
         return pd.DataFrame()
 
     df = pd.DataFrame(rows)
-    # Pivot over/under into single row per player-line-bookmaker
     over = df[df["side"].str.lower() == "over"].rename(columns={"price": "over_price"})
     under = df[df["side"].str.lower() == "under"].rename(columns={"price": "under_price"})
     merged = pd.merge(
@@ -159,7 +162,21 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
         on=["player_name", "market", "line", "bookmaker"],
         how="outer",
     )
-    return merged
+
+    # For each player, keep preferred book if present, else best over_price
+    def pick_best(grp: pd.DataFrame) -> pd.Series:
+        preferred = grp[grp["bookmaker"].isin(PREFERRED_BOOKS)]
+        if not preferred.empty:
+            return preferred.iloc[0]
+        # Fall back to book with best (highest) over_price
+        return grp.loc[grp["over_price"].idxmax()] if grp["over_price"].notna().any() else grp.iloc[0]
+
+    best = (
+        merged.groupby(["player_name", "market", "line"], group_keys=False)
+        .apply(pick_best)
+        .reset_index(drop=True)
+    )
+    return best
 
 
 def get_today_lines() -> pd.DataFrame:
