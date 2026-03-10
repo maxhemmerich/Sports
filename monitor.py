@@ -195,13 +195,13 @@ if not bets_df.empty:
 
 # ── Arbitrage Opportunities ───────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("Arbitrage Opportunities (Pinnacle vs bet365)")
+st.subheader("Arbitrage Opportunities (All Books)")
 
 try:
     from odds import get_arbitrage_opportunities
     arb_df = get_arbitrage_opportunities()
     if arb_df.empty:
-        st.info("No arbitrage opportunities found. Arb requires both Pinnacle and bet365 lines for the same player/market.")
+        st.info("No arbitrage opportunities found across available books.")
     else:
         st.success(f"{len(arb_df)} arb opportunity(ies) found!")
         st.dataframe(arb_df, use_container_width=True, hide_index=True)

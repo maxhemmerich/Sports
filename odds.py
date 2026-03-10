@@ -301,59 +301,53 @@ def _parse_props_all_books(bookmakers: list[dict]) -> pd.DataFrame:
 
 def detect_arbitrage(all_books_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Find arbitrage opportunities between Pinnacle and bet365.
+    Find arbitrage opportunities across ALL available bookmakers.
 
-    Arb exists when:
-        implied_prob(over @ book_A) + implied_prob(under @ book_B) < 1.0
+    For each (player, market, line) group, finds the best over price across all
+    books and the best under price across all books.  If those come from different
+    books and their combined implied probability < 1.0, it's an arb.
 
-    The arb_pct is the guaranteed profit as a % of total stake.
+    arb_pct = guaranteed profit as % of total stake.
     Returns rows sorted by arb_pct descending.
     """
     if all_books_df.empty:
         return pd.DataFrame()
 
-    pin = all_books_df[all_books_df["bookmaker"] == "pinnacle"]
-    b365 = all_books_df[all_books_df["bookmaker"] == "bet365"]
-
-    if pin.empty or b365.empty:
-        return pd.DataFrame()
-
     key_cols = ["player_name", "market", "line"]
-    pin_indexed = pin.set_index(key_cols)
-    b365_indexed = b365.set_index(key_cols)
-    common_keys = pin_indexed.index.intersection(b365_indexed.index)
-
     arb_rows = []
-    for key in common_keys:
-        p_row = pin_indexed.loc[key]
-        b_row = b365_indexed.loc[key]
 
-        pin_over = p_row.get("over_price")
-        pin_under = p_row.get("under_price")
-        b365_over = b_row.get("over_price")
-        b365_under = b_row.get("under_price")
+    for key, grp in all_books_df.groupby(key_cols):
+        player, market, line = key
 
-        combos = []
-        if pd.notna(pin_over) and pd.notna(b365_under):
-            combos.append(("OVER", "pinnacle", float(pin_over), "UNDER", "bet365", float(b365_under)))
-        if pd.notna(b365_over) and pd.notna(pin_under):
-            combos.append(("OVER", "bet365", float(b365_over), "UNDER", "pinnacle", float(pin_under)))
+        over_rows = grp[grp["over_price"].notna()][["over_price", "bookmaker"]]
+        under_rows = grp[grp["under_price"].notna()][["under_price", "bookmaker"]]
 
-        for side1, bk1, price1, side2, bk2, price2 in combos:
-            p1 = implied_probability(price1)
-            p2 = implied_probability(price2)
-            total_implied = p1 + p2
-            if total_implied < 1.0:
-                arb_pct = round((1 - total_implied) * 100, 2)
-                player, market, line = key
-                arb_rows.append({
-                    "player": player,
-                    "market": market.replace("player_", ""),
-                    "line": line,
-                    "leg1": f"{side1} @ {bk1} ({int(price1):+d})",
-                    "leg2": f"{side2} @ {bk2} ({int(price2):+d})",
-                    "arb_%": arb_pct,
-                })
+        if over_rows.empty or under_rows.empty:
+            continue
+
+        best_over_idx = over_rows["over_price"].idxmax()
+        best_over_price = float(over_rows.loc[best_over_idx, "over_price"])
+        best_over_book = over_rows.loc[best_over_idx, "bookmaker"]
+
+        best_under_idx = under_rows["under_price"].idxmax()
+        best_under_price = float(under_rows.loc[best_under_idx, "under_price"])
+        best_under_book = under_rows.loc[best_under_idx, "bookmaker"]
+
+        # Same book on both sides is not a real arb opportunity
+        if best_over_book == best_under_book:
+            continue
+
+        total_implied = implied_probability(best_over_price) + implied_probability(best_under_price)
+        if total_implied < 1.0:
+            arb_pct = round((1 - total_implied) * 100, 2)
+            arb_rows.append({
+                "player": player,
+                "market": market.replace("player_", ""),
+                "line": line,
+                "leg1": f"OVER @ {best_over_book} ({int(best_over_price):+d})",
+                "leg2": f"UNDER @ {best_under_book} ({int(best_under_price):+d})",
+                "arb_%": arb_pct,
+            })
 
     if not arb_rows:
         return pd.DataFrame()
@@ -392,7 +386,7 @@ def _fetch_sharp_props_nba() -> list[dict]:
 
 def get_arbitrage_opportunities() -> pd.DataFrame:
     """
-    Return today's arbitrage opportunities between Pinnacle and bet365.
+    Return today's arbitrage opportunities across all available bookmakers.
     Reads from cached props files so no extra API calls are made.
     """
     today = date.today().isoformat()
