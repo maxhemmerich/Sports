@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+import unicodedata
 from datetime import date
 from pathlib import Path
 
@@ -276,33 +277,46 @@ def run_screener(
     def_lookup = build_defense_lookup()
     print(f"[screener] Data loaded: {len(df_history)} game rows, {len(def_lookup)} defense entries.")
 
-    # Build a fast name lookup set from history
-    known_players = set(df_history["player_name"].unique())
+    # Build name lookup: normalized → actual NBA name
+    def _norm(name: str) -> str:
+        """Canonical name for fuzzy matching."""
+        # Strip Unicode accents (Dončić → Doncic, Luka Šamanić → Luka Samanic)
+        name = unicodedata.normalize("NFD", name)
+        name = "".join(c for c in name if unicodedata.category(c) != "Mn")
+        # Remove periods from initials: C.J. → CJ, R.J. → RJ, A.J. → AJ
+        import re
+        name = re.sub(r"\b([A-Z])\.([A-Z])\.", r"\1\2", name)  # X.Y. → XY
+        name = re.sub(r"\b([A-Z])\.", r"\1", name)             # X. → X
+        # Normalise Jr./Sr./II/III suffixes
+        name = re.sub(r"\s+(Jr\.?|Sr\.?|II|III|IV)$", lambda m: " " + m.group(1).rstrip("."), name, flags=re.IGNORECASE)
+        return " ".join(name.strip().lower().split())
+
+    nba_names = list(df_history["player_name"].unique())
+    norm_to_nba = {_norm(n): n for n in nba_names}
 
     results = []
     seen_players = set()  # screen each player once
     n_no_history = 0
-    n_small_diff = 0
-    n_low_edge = 0
+    predictions_log = []  # for debug output
 
     for _, row in lines_df.iterrows():
         player = row.get("player_name", "")
         if not player or player in seen_players:
             continue
-        seen_players.add(player)  # always mark seen regardless of result
+        seen_players.add(player)
 
         line = row.get("line")
         if pd.isna(line):
             continue
 
-        # Fast name-match check with fuzzy fallback
-        if player not in known_players:
-            # Try simple normalisation (strip extra spaces, title-case)
-            candidate = " ".join(player.strip().split())
-            if candidate not in known_players:
+        # Name resolution: exact → normalized
+        if player in norm_to_nba.values():
+            nba_player = player
+        else:
+            nba_player = norm_to_nba.get(_norm(player))
+            if nba_player is None:
                 n_no_history += 1
                 continue
-            player = candidate  # use normalised name
 
         over_price = row.get("over_price")
         under_price = row.get("under_price")
@@ -312,7 +326,7 @@ def run_screener(
         commence_time = row.get("commence_time", "")
 
         result = screen_player(
-            player_name=player,
+            player_name=nba_player,
             line=float(line),
             over_price=over_price,
             under_price=under_price,
@@ -327,22 +341,53 @@ def run_screener(
 
         if result:
             results.append(result)
-        elif result is None:
-            pass  # already counted above or filtered inside screen_player
+            predictions_log.append((nba_player, float(line), result["prediction"], result["edge_pct"], "FLAGGED"))
+        else:
+            # Log for debug: compute prediction anyway to understand rejections
+            predictions_log.append((nba_player, float(line), None, None, "skipped"))
 
     print(f"[screener] Players screened: {len(seen_players)} | "
           f"No history: {n_no_history} | "
           f"Flagged: {len(results)}")
 
-    # Show unmatched names so user can diagnose API name differences
+    # Show top predictions vs lines to diagnose why bets are/aren't flagged
+    from features import build_live_features as _blf
+    game_date_str = date.today().isoformat()
+    diag_rows = []
+    for _, row in lines_df.iterrows():
+        p_raw = row.get("player_name", "")
+        nba_p = norm_to_nba.get(_norm(p_raw)) if p_raw not in norm_to_nba.values() else p_raw
+        if not nba_p:
+            continue
+        ln = row.get("line")
+        if pd.isna(ln):
+            continue
+        feats = _blf(nba_p, "", False, game_date_str, df_history, def_lookup)
+        if feats:
+            from model import predict as _pred
+            pred = _pred(feats, model)
+            diff = pred - float(ln)
+            o_p = row.get("over_price")
+            u_p = row.get("under_price")
+            diag_rows.append((nba_p, float(ln), round(pred, 1), round(diff, 1),
+                              "" if pd.isna(o_p) else int(o_p),
+                              "" if pd.isna(u_p) else int(u_p)))
+
+    if diag_rows:
+        print("\n[DEBUG] Prediction vs Line (all matched players):")
+        print(f"{'Player':<28} {'Line':>6} {'Pred':>6} {'Diff':>6} {'Over':>6} {'Under':>6}")
+        print("-" * 62)
+        for r in sorted(diag_rows, key=lambda x: abs(x[3]), reverse=True)[:20]:
+            print(f"{r[0]:<28} {r[1]:>6.1f} {r[2]:>6.1f} {r[3]:>+6.1f} {str(r[4]):>6} {str(r[5]):>6}")
+
+    # Show unmatched names
     if n_no_history > 0:
-        unmatched = []
-        for _, row in lines_df.iterrows():
-            p = row.get("player_name", "")
-            if p and p not in known_players and " ".join(p.strip().split()) not in known_players:
-                unmatched.append(p)
+        unmatched = [row.get("player_name", "") for _, row in lines_df.iterrows()
+                     if row.get("player_name", "") and norm_to_nba.get(_norm(row.get("player_name", ""))) is None
+                     and row.get("player_name", "") not in norm_to_nba.values()]
+        unmatched = list(dict.fromkeys(unmatched))  # deduplicate
         if unmatched:
-            print(f"[screener] Unmatched player names (first 10): {unmatched[:10]}")
+            print(f"[screener] Still unmatched (first 10): {unmatched[:10]}")
 
     if not results:
         print("[screener] No +EV bets found today.")
