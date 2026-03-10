@@ -158,24 +158,30 @@ def add_travel_distance(df: pd.DataFrame) -> pd.DataFrame:
 def add_defense_features(df: pd.DataFrame, def_lookup: pd.DataFrame) -> pd.DataFrame:
     """
     Merge opponent avg_pts_allowed into game log df.
-    def_lookup has columns: team_id, season, avg_pts_allowed
+    def_lookup has columns: team_abbreviation, season, avg_pts_allowed
+    Opponent abbreviation is derived from the matchup string.
     """
-    if def_lookup.empty or "opponent_team_id" not in df.columns:
-        df["opp_avg_pts_allowed"] = df.get("pts", pd.Series(dtype=float)).expanding().mean()
+    df = df.copy()
+
+    if def_lookup.empty or "matchup" not in df.columns:
+        df["opp_avg_pts_allowed"] = 110.0
         return df
 
-    df = df.copy()
+    df["opp_abbr_def"] = df.apply(
+        lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
+        axis=1,
+    )
+
     merged = df.merge(
-        def_lookup[["team_id", "season", "avg_pts_allowed"]].rename(
-            columns={"team_id": "opponent_team_id"}
+        def_lookup[["team_abbreviation", "season", "avg_pts_allowed"]].rename(
+            columns={"team_abbreviation": "opp_abbr_def"}
         ),
-        on=["opponent_team_id", "season"],
+        on=["opp_abbr_def", "season"],
         how="left",
     )
-    merged["opp_avg_pts_allowed"] = merged["avg_pts_allowed"].fillna(
-        merged["avg_pts_allowed"].median()
-    )
-    merged = merged.drop(columns=["avg_pts_allowed"], errors="ignore")
+    league_avg = merged["avg_pts_allowed"].median()
+    merged["opp_avg_pts_allowed"] = merged["avg_pts_allowed"].fillna(league_avg if not pd.isna(league_avg) else 110.0)
+    merged = merged.drop(columns=["avg_pts_allowed", "opp_abbr_def"], errors="ignore")
     return merged
 
 
@@ -416,12 +422,12 @@ def build_live_features(
         if prev_venue and curr_venue:
             travel_km = haversine_km(prev_venue[0], prev_venue[1], curr_venue[0], curr_venue[1])
 
-    # Opponent defense
+    # Opponent defense — look up how many pts this team allows per game
     opp_avg_pts_allowed = 110.0  # fallback league average
-    if not def_lookup.empty and "team_id" in def_lookup.columns:
-        opp_rows = def_lookup
+    if not def_lookup.empty and "team_abbreviation" in def_lookup.columns:
+        opp_rows = def_lookup[def_lookup["team_abbreviation"] == opponent_team_abbr]
         if not opp_rows.empty:
-            opp_avg_pts_allowed = float(opp_rows["avg_pts_allowed"].median())
+            opp_avg_pts_allowed = float(opp_rows["avg_pts_allowed"].mean())
 
     roll_fga_10 = 0.0
     if "fga" in player_df.columns:

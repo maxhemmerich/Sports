@@ -229,20 +229,44 @@ def load_gamelogs() -> pd.DataFrame:
     return df
 
 
+def _extract_opp_abbr(matchup: str, team_abbr: str) -> str:
+    """Derive opponent team abbreviation from matchup string."""
+    for sep in [" vs. ", " @ "]:
+        if sep in matchup:
+            left, right = matchup.split(sep, 1)
+            left, right = left.strip(), right.strip()
+            return right if left == team_abbr else left
+    return ""
+
+
 def fetch_team_defense_stats(season: str) -> pd.DataFrame:
+    """
+    Compute how many points each team allows per game.
+    Keyed by opp_abbreviation (the defending team) so we can merge by team abbr.
+    """
     df = fetch_player_gamelogs(season)
-    if "opponent_team_id" not in df.columns:
+    required = {"matchup", "team_abbreviation", "game_id", "pts"}
+    if not required.issubset(df.columns):
         return pd.DataFrame()
-    game_team = (
-        df.groupby(["game_id", "team_id", "opponent_team_id"])["pts"]
+
+    df = df.copy()
+    df["opp_abbreviation"] = df.apply(
+        lambda r: _extract_opp_abbr(str(r["matchup"]), str(r["team_abbreviation"])),
+        axis=1,
+    )
+    df = df[df["opp_abbreviation"] != ""]
+
+    # Total points scored against each opponent per game
+    game_totals = (
+        df.groupby(["game_id", "opp_abbreviation"])["pts"]
         .sum()
         .reset_index()
     )
     def_stats = (
-        game_team.groupby("opponent_team_id")["pts"]
+        game_totals.groupby("opp_abbreviation")["pts"]
         .agg(["mean", "count"])
         .reset_index()
-        .rename(columns={"opponent_team_id": "team_id", "mean": "avg_pts_allowed", "count": "games"})
+        .rename(columns={"opp_abbreviation": "team_abbreviation", "mean": "avg_pts_allowed", "count": "games"})
     )
     def_stats["season"] = season
     return def_stats
