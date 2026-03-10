@@ -120,7 +120,13 @@ def predict(features: dict, model: XGBRegressor | None = None) -> float:
     if model is None:
         model = load_model()
 
-    available = [c for c in FEATURE_COLS if c in features]
+    # Use the exact feature names the model was trained on (from the booster)
+    # This avoids mismatch if FEATURE_COLS and model diverge.
+    trained_features = model.get_booster().feature_names
+    if trained_features:
+        available = [c for c in trained_features if c in features]
+    else:
+        available = [c for c in FEATURE_COLS if c in features]
     if not available:
         raise ValueError("No matching feature columns found in input dict.")
 

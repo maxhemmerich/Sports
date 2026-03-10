@@ -228,6 +228,7 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     df = add_rolling_features(df)
     df = add_rest_features(df)
     df = add_home_away(df)
+    df = add_travel_distance(df)
     df = add_pace_proxy(df)
     df = add_defense_features(df, def_lookup)
 
