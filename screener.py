@@ -318,6 +318,23 @@ def run_screener(
     nba_names = list(df_history["player_name"].unique())
     norm_to_nba = {_norm(n): n for n in nba_names}
 
+    # Load active (unsettled) bets so we don't show bets we're already in
+    active_bets: set[tuple[str, str]] = set()
+    _tracker_path = RESULTS_DIR / "bet_tracker.csv"
+    if _tracker_path.exists():
+        try:
+            _tracker = pd.read_csv(_tracker_path)
+            _pending = _tracker[~_tracker["result"].isin(["WIN", "LOSS", "PUSH"])]
+            for _, _row in _pending.iterrows():
+                _p = str(_row.get("player", "")).strip()
+                _m = str(_row.get("market", "")).strip()
+                if _p and _m:
+                    active_bets.add((_p, _m))
+            if active_bets:
+                print(f"[screener] Skipping {len(active_bets)} market(s) already in play.")
+        except Exception:
+            pass
+
     results = []
     # seen key = (player_raw, market) so same player can have pts + reb + ast
     seen_keys = set()
@@ -330,6 +347,11 @@ def run_screener(
         if not player or key in seen_keys:
             continue
         seen_keys.add(key)
+
+        # Skip bets we're already in
+        nba_player_check = norm_to_nba.get(_norm(player), player)
+        if (nba_player_check, market) in active_bets:
+            continue
 
         line = row.get("line")
         if pd.isna(line):
