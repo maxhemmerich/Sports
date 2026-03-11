@@ -6,7 +6,7 @@ for the screener.
 Endpoints used:
   GET /v4/sports/basketball_nba/events
   GET /v4/sports/basketball_nba/events/{event_id}/odds
-       ?regions=us&markets=player_points,player_rebounds,player_assists
+       ?regions=us&markets=player_points,player_rebounds,player_assists,player_threes,...
 """
 
 import os
@@ -28,7 +28,7 @@ SPORT = "basketball_nba"
 # We fetch all available books and prefer PREFERRED_BOOKS if present.
 PREFERRED_BOOKS = {"pinnacle", "bet365"}
 REGIONS = "us"          # free tier: us region has player props coverage
-MARKETS = "player_points,player_rebounds,player_assists"
+MARKETS = "player_points,player_rebounds,player_assists,player_threes,player_blocks,player_steals,player_turnovers"
 
 # ── SharpAPI config (optional) ────────────────────────────────────────────────
 # SharpAPI provides Pinnacle + bet365 lines with better coverage than Odds API.

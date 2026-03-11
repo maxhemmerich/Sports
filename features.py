@@ -88,7 +88,7 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     Expects df sorted by player_id, game_date.
     """
     df = df.sort_values(["player_id", "game_date"]).copy()
-    for stat in ["pts", "reb", "ast"]:
+    for stat in ["pts", "reb", "ast", "fg3m", "blk", "stl", "tov"]:
         if stat not in df.columns:
             continue
         for window in [5, 10, 20]:
@@ -321,12 +321,36 @@ FEATURE_COLS_AST = [
 TARGET_COL = "pts"
 TARGET_COL_REB = "reb"
 TARGET_COL_AST = "ast"
+TARGET_COL_FG3M = "fg3m"
+TARGET_COL_BLK = "blk"
+TARGET_COL_STL = "stl"
+TARGET_COL_TOV = "tov"
+
+# Shared context features used by every model
+_CONTEXT_COLS = [
+    "opp_avg_pts_allowed",
+    "opp_team_pace",
+    "days_rest",
+    "back_to_back",
+    "is_home",
+    "travel_km",
+    "roll_fga_10",
+]
+
+FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "vs_opp_fg3m_avg"] + _CONTEXT_COLS
+FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "vs_opp_blk_avg"]  + _CONTEXT_COLS
+FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "vs_opp_stl_avg"]  + _CONTEXT_COLS
+FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "vs_opp_tov_avg"]  + _CONTEXT_COLS
 
 # Map market key → (feature_cols, target_col)
 MARKET_CONFIG = {
-    "player_points":   (FEATURE_COLS,     TARGET_COL),
-    "player_rebounds": (FEATURE_COLS_REB, TARGET_COL_REB),
-    "player_assists":  (FEATURE_COLS_AST, TARGET_COL_AST),
+    "player_points":    (FEATURE_COLS,      TARGET_COL),
+    "player_rebounds":  (FEATURE_COLS_REB,  TARGET_COL_REB),
+    "player_assists":   (FEATURE_COLS_AST,  TARGET_COL_AST),
+    "player_threes":    (FEATURE_COLS_FG3M, TARGET_COL_FG3M),
+    "player_blocks":    (FEATURE_COLS_BLK,  TARGET_COL_BLK),
+    "player_steals":    (FEATURE_COLS_STL,  TARGET_COL_STL),
+    "player_turnovers": (FEATURE_COLS_TOV,  TARGET_COL_TOV),
 }
 
 
@@ -341,7 +365,7 @@ def add_vs_opponent_features(df: pd.DataFrame) -> pd.DataFrame:
         lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
         axis=1,
     )
-    for stat in ["pts", "reb", "ast"]:
+    for stat in ["pts", "reb", "ast", "fg3m", "blk", "stl", "tov"]:
         if stat not in df.columns:
             continue
         col = f"vs_opp_{stat}_avg"
@@ -365,7 +389,7 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     if cache.exists():
         age_days = (time.time() - cache.stat().st_mtime) / 86400
         cached_cols = set(pd.read_csv(cache, nrows=0).columns)
-        all_required = set(FEATURE_COLS + FEATURE_COLS_REB + FEATURE_COLS_AST)
+        all_required = set(FEATURE_COLS + FEATURE_COLS_REB + FEATURE_COLS_AST + FEATURE_COLS_FG3M)
         if age_days <= MAX_CACHE_AGE_DAYS and all_required.issubset(cached_cols):
             print(f"[features] Loading feature matrix from cache: {cache}")
             out = pd.read_csv(cache, low_memory=False)

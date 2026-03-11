@@ -152,6 +152,9 @@ def fetch_season_gamelogs_league(season: str) -> pd.DataFrame:
         "fg3m": "fg3m",
         "fta": "fta",
         "ftm": "ftm",
+        "stl": "stl",
+        "blk": "blk",
+        "tov": "tov",
         "min": "min",
         "plus_minus": "plus_minus",
     }

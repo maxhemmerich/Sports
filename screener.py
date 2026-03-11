@@ -43,11 +43,14 @@ RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
-# Points have wider spread than rebounds/assists.
 SIGMA_BY_MARKET = {
-    "player_points":   5.0,
-    "player_rebounds": 2.5,
-    "player_assists":  2.5,
+    "player_points":    5.0,
+    "player_rebounds":  2.5,
+    "player_assists":   2.5,
+    "player_threes":    1.2,
+    "player_blocks":    0.8,
+    "player_steals":    0.8,
+    "player_turnovers": 1.2,
 }
 
 

@@ -1,11 +1,11 @@
 """
 model.py — XGBoost regressors trained on historical player game logs.
 
-Supports three targets: pts, reb, ast
-Models saved as: model_pts.pkl, model_reb.pkl, model_ast.pkl
+Supports targets: pts, reb, ast, fg3m, blk, stl, tov
+Models saved as: model_pts.pkl, model_reb.pkl, model_ast.pkl, etc.
 
 Usage:
-    python model.py                    # train all three models
+    python model.py                    # train all models
     python model.py --target pts       # train only points model
     python model.py --eval             # train + walk-forward CV
     python model.py --retrain          # force retrain even if .pkl exists
@@ -34,9 +34,13 @@ DATA_DIR = Path("data")
 MODEL_PATH = MODEL_DIR / "model_pts.pkl"
 
 _TARGET_TO_FILE = {
-    "pts": MODEL_DIR / "model_pts.pkl",
-    "reb": MODEL_DIR / "model_reb.pkl",
-    "ast": MODEL_DIR / "model_ast.pkl",
+    "pts":  MODEL_DIR / "model_pts.pkl",
+    "reb":  MODEL_DIR / "model_reb.pkl",
+    "ast":  MODEL_DIR / "model_ast.pkl",
+    "fg3m": MODEL_DIR / "model_fg3m.pkl",
+    "blk":  MODEL_DIR / "model_blk.pkl",
+    "stl":  MODEL_DIR / "model_stl.pkl",
+    "tov":  MODEL_DIR / "model_tov.pkl",
 }
 
 
@@ -55,7 +59,7 @@ def load_training_data(target: str = "pts") -> tuple[pd.DataFrame, pd.Series]:
             feat_cols = cols
             break
     if feat_cols is None:
-        raise ValueError(f"Unknown target '{target}'. Choose from: pts, reb, ast")
+        raise ValueError(f"Unknown target '{target}'. Choose from: {list({tgt for _, (_, tgt) in MARKET_CONFIG.items()})}")
 
     df = build_feature_matrix()
     available_features = [c for c in feat_cols if c in df.columns]
@@ -169,7 +173,7 @@ def predict(features: dict, model: XGBRegressor | None = None, target: str = "pt
     Args:
         features: dict returned by features.build_live_features()
         model: pre-loaded model (optional, loads from disk if None)
-        target: 'pts', 'reb', or 'ast' — used to load the correct model if model is None
+        target: stat column name (pts/reb/ast/fg3m/blk/stl/tov) — used to load the correct model if model is None
 
     Returns:
         Predicted value (float)
@@ -239,13 +243,13 @@ if __name__ == "__main__":
     parser.add_argument("--retrain", action="store_true", help="Force retrain even if .pkl exists")
     parser.add_argument(
         "--target",
-        choices=["pts", "reb", "ast", "all"],
+        choices=["pts", "reb", "ast", "fg3m", "blk", "stl", "tov", "all"],
         default="all",
         help="Which target to train (default: all)",
     )
     args = parser.parse_args()
 
-    targets = ["pts", "reb", "ast"] if args.target == "all" else [args.target]
+    targets = ["pts", "reb", "ast", "fg3m", "blk", "stl", "tov"] if args.target == "all" else [args.target]
     for tgt in targets:
         _train_target(tgt, do_eval=args.eval, retrain=args.retrain)
 
