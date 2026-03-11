@@ -505,6 +505,43 @@ def prompt_update_results() -> None:
     print(f"[tracker] Results saved → {TRACKER_PATH}")
 
 
+def prompt_bankroll() -> float:
+    """
+    Ask for current cash balance, then add unsettled bet amounts to get total bankroll.
+    Falls back to BANKROLL constant if skipped.
+    """
+    print(f"\n{'=' * 60}")
+    print("Enter your current cash balance (or Enter to use default):")
+    try:
+        raw = input(f"  Cash balance [${BANKROLL:.2f}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return BANKROLL
+
+    if not raw:
+        cash = BANKROLL
+    else:
+        try:
+            cash = float(raw.replace("$", "").replace(",", ""))
+        except ValueError:
+            print(f"  Invalid — using default ${BANKROLL:.2f}")
+            cash = BANKROLL
+
+    # Add unsettled bets (money currently at risk)
+    at_risk = 0.0
+    if TRACKER_PATH.exists():
+        df = pd.read_csv(TRACKER_PATH)
+        pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
+        if not pending.empty and "entered_$" in pending.columns:
+            at_risk = pending["entered_$"].fillna(0).sum()
+
+    bankroll = cash + at_risk
+    if at_risk > 0:
+        print(f"  Cash: ${cash:.2f}  +  At risk (unsettled): ${at_risk:.2f}  =  Bankroll: ${bankroll:.2f}")
+    else:
+        print(f"  Bankroll: ${bankroll:.2f}")
+    return bankroll
+
+
 def prompt_bookmaker(lines_df: pd.DataFrame) -> str | None:
     """
     Show available bookmakers from today's lines and let the user pick one (or all).
@@ -643,6 +680,12 @@ if __name__ == "__main__":
     # Settle unsettled bets from previous sessions first
     prompt_update_results()
 
+    # Bankroll: CLI --bankroll overrides prompt (useful for scripts/cron)
+    if args.bankroll != BANKROLL:
+        bankroll = args.bankroll
+    else:
+        bankroll = prompt_bankroll()
+
     # Bookmaker selection: CLI flag takes precedence, otherwise interactive prompt
     if args.draftkings:
         bookmaker = "draftkings"
@@ -655,7 +698,7 @@ if __name__ == "__main__":
         bookmaker = prompt_bookmaker(_lines_preview)
 
     bets = run_screener(
-        bankroll=args.bankroll,
+        bankroll=bankroll,
         min_edge=args.min_edge,
         min_diff=args.min_diff,
         debug=args.debug,
@@ -669,7 +712,7 @@ if __name__ == "__main__":
 
     if not bets.empty:
         total_bet = bets["bet_dollars"].sum()
-        print(f"\nTotal allocated: ${total_bet:.2f} / ${args.bankroll:.2f} ({total_bet/args.bankroll*100:.1f}%)")
+        print(f"\nTotal allocated: ${total_bet:.2f} / ${bankroll:.2f} ({total_bet/bankroll*100:.1f}%)")
         print(f"Bets flagged: {len(bets)}")
         print(f"\nResults saved to: results/bets_{date.today().isoformat()}.csv")
 
