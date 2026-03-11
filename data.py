@@ -19,6 +19,11 @@ SEASON_TYPE = "Regular Season"
 REQUEST_DELAY = 1.2   # polite delay between requests (seconds)
 NBA_TIMEOUT = 60      # per-request timeout
 
+# Past seasons never change; only the current season needs daily refresh.
+CURRENT_SEASON = SEASONS[-1]
+GAMELOG_CACHE_HOURS = int(__import__("os").getenv("GAMELOG_CACHE_HOURS", "12"))
+COMBINED_CACHE_HOURS = int(__import__("os").getenv("COMBINED_CACHE_HOURS", "12"))
+
 # Full browser headers — stats.nba.com rejects bot-like requests
 _SESSION = requests.Session()
 _SESSION.headers.update({
@@ -168,10 +173,14 @@ def fetch_player_gamelogs(season: str) -> pd.DataFrame:
     """
     cache_path = DATA_DIR / f"gamelogs_{season.replace('-', '_')}.csv"
     if cache_path.exists():
-        print(f"  [cache] Loading {season} from {cache_path}")
-        df = pd.read_csv(cache_path, low_memory=False)
-        df["game_date"] = pd.to_datetime(df["game_date"])
-        return df
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        # Past seasons are final; only refresh the current season periodically.
+        if season != CURRENT_SEASON or age_hours <= GAMELOG_CACHE_HOURS:
+            print(f"  [cache] Loading {season} from {cache_path}")
+            df = pd.read_csv(cache_path, low_memory=False)
+            df["game_date"] = pd.to_datetime(df["game_date"])
+            return df
+        print(f"  [cache] {season} cache is {age_hours:.1f}h old — refreshing ...")
 
     df = pd.DataFrame()
     try:
@@ -217,10 +226,14 @@ def load_gamelogs() -> pd.DataFrame:
     """
     out_path = DATA_DIR / "gamelogs_combined.csv"
     if out_path.exists():
-        print(f"[data] Loading combined gamelogs from cache: {out_path}")
-        df = pd.read_csv(out_path, low_memory=False)
-        df["game_date"] = pd.to_datetime(df["game_date"])
-        return df
+        age_hours = (time.time() - out_path.stat().st_mtime) / 3600
+        if age_hours <= COMBINED_CACHE_HOURS:
+            print(f"[data] Loading combined gamelogs from cache: {out_path}")
+            df = pd.read_csv(out_path, low_memory=False)
+            df["game_date"] = pd.to_datetime(df["game_date"])
+            return df
+        print(f"[data] Combined cache is {age_hours:.1f}h old — refreshing ...")
+        out_path.unlink()
 
     print("[data] Building combined gamelogs ...")
     df = fetch_all_seasons()
@@ -275,7 +288,10 @@ def fetch_team_defense_stats(season: str) -> pd.DataFrame:
 def build_defense_lookup() -> pd.DataFrame:
     out_path = DATA_DIR / "team_defense.csv"
     if out_path.exists():
-        return pd.read_csv(out_path)
+        age_hours = (time.time() - out_path.stat().st_mtime) / 3600
+        if age_hours <= COMBINED_CACHE_HOURS:
+            return pd.read_csv(out_path)
+        out_path.unlink()
     frames = []
     for season in SEASONS:
         df = fetch_team_defense_stats(season)
