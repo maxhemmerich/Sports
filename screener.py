@@ -446,6 +446,100 @@ def run_screener(
 TRACKER_PATH = RESULTS_DIR / "bet_tracker.csv"
 
 
+def prompt_update_results() -> None:
+    """
+    At startup: find unsettled bets in the tracker and prompt for WIN/LOSS/PUSH.
+    """
+    if not TRACKER_PATH.exists():
+        return
+    df = pd.read_csv(TRACKER_PATH)
+    pending_mask = df["result"].isna() | (df["result"].astype(str).str.strip() == "")
+    pending = df[pending_mask]
+    if pending.empty:
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f"{len(pending)} unsettled bet(s) in tracker — update results?")
+    pending_list = list(pending.iterrows())
+    for i, (_, row) in enumerate(pending_list, 1):
+        mkt = str(row.get("market", "")).replace("player_", "")
+        odds_str = f"{int(row['odds']):+d}" if not pd.isna(row.get("odds")) else "?"
+        print(f"  {i}. {row['date']} | {row['player']} | {mkt} | {row['side']} {row['line']} @ {odds_str} | ${float(row['entered_$']):.2f}")
+
+    print("Enter row numbers to settle (e.g. 1,3) or Enter to skip:")
+    try:
+        raw = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if not raw:
+        return
+
+    try:
+        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip()]
+    except ValueError:
+        print("[tracker] Invalid input — skipping.")
+        return
+
+    result_map = {"W": "WIN", "L": "LOSS", "P": "PUSH", "WIN": "WIN", "LOSS": "LOSS", "PUSH": "PUSH"}
+    for i in indices:
+        if i < 0 or i >= len(pending_list):
+            continue
+        orig_idx, row = pending_list[i]
+        mkt = str(row.get("market", "")).replace("player_", "")
+        print(f"  {row['player']} | {mkt} | {row['side']} {row['line']}")
+        try:
+            raw_result = input("  Result (W/L/P): ").strip().upper()
+        except (EOFError, KeyboardInterrupt):
+            break
+        result = result_map.get(raw_result)
+        if result:
+            df.at[orig_idx, "result"] = result
+            print(f"    → {result}")
+        else:
+            print(f"    Unrecognized '{raw_result}' — skipping.")
+
+    df.to_csv(TRACKER_PATH, index=False)
+    print(f"[tracker] Results saved → {TRACKER_PATH}")
+
+
+def prompt_bookmaker(lines_df: pd.DataFrame) -> str | None:
+    """
+    Show available bookmakers from today's lines and let the user pick one (or all).
+    Returns the selected bookmaker string, or None for all books.
+    """
+    if "bookmaker" not in lines_df.columns:
+        return None
+    books = sorted(lines_df["bookmaker"].dropna().unique())
+    if not books:
+        return None
+
+    print(f"\n{'=' * 60}")
+    print("Available bookmakers:")
+    for i, b in enumerate(books, 1):
+        print(f"  {i}. {b}")
+    print(f"  {len(books) + 1}. All bookmakers")
+    print("Select (number or name, Enter for all):")
+    try:
+        raw = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+    if not raw:
+        return None
+    try:
+        idx = int(raw) - 1
+        if idx == len(books):
+            return None
+        if 0 <= idx < len(books):
+            return books[idx]
+    except ValueError:
+        matched = [b for b in books if raw.lower() in b.lower()]
+        if len(matched) == 1:
+            return matched[0]
+        if matched:
+            print(f"  Ambiguous: {matched} — using all.")
+    return None
+
+
 def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
     """
     Interactive: ask which flagged bets were placed and log them to the tracker.
@@ -539,11 +633,23 @@ if __name__ == "__main__":
     parser.add_argument("--min-diff", type=float, default=MIN_LINE_DIFF, help="Min |prediction - line| pts")
     parser.add_argument("--debug", action="store_true", help="Print prediction vs line debug table")
     bk_group = parser.add_mutually_exclusive_group()
-    bk_group.add_argument("--draftkings", action="store_true", help="Only show DraftKings lines")
-    bk_group.add_argument("--bookmaker", type=str, default=None, help="Filter to a specific bookmaker (e.g. draftkings, fanduel)")
+    bk_group.add_argument("--draftkings", action="store_true", help="Only show DraftKings lines (skips prompt)")
+    bk_group.add_argument("--bookmaker", type=str, default=None, help="Filter to a specific bookmaker (skips prompt)")
     args = parser.parse_args()
 
-    bookmaker = "draftkings" if args.draftkings else args.bookmaker
+    # Settle unsettled bets from previous sessions first
+    prompt_update_results()
+
+    # Bookmaker selection: CLI flag takes precedence, otherwise interactive prompt
+    if args.draftkings:
+        bookmaker = "draftkings"
+    elif args.bookmaker:
+        bookmaker = args.bookmaker
+    else:
+        # Fetch lines once just to show available books for the prompt
+        from odds import get_today_lines as _get_lines
+        _lines_preview = _get_lines()
+        bookmaker = prompt_bookmaker(_lines_preview)
 
     bets = run_screener(
         bankroll=args.bankroll,
