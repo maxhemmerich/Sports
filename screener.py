@@ -238,6 +238,7 @@ def run_screener(
     min_edge: float = MIN_EDGE_PCT,
     min_diff: float = MIN_LINE_DIFF,
     debug: bool = False,
+    bookmaker_filter: str | None = None,
 ) -> pd.DataFrame:
     """
     Main screener pipeline.
@@ -254,7 +255,8 @@ def run_screener(
     max_exposure = MAX_TOTAL_EXPOSURE * bankroll
 
     print("=== NBA Props Screener ===")
-    print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts")
+    print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts"
+          + (f"  |  Bookmaker: {bookmaker_filter}" if bookmaker_filter else ""))
 
     # Load models for each market (auto-train if missing or stale)
     from model import _train_target, load_training_data as _ltd, train as _train, save_model as _save, is_model_stale
@@ -281,6 +283,15 @@ def run_screener(
     supported_markets = set(MARKET_CONFIG.keys())
     if "market" in lines_df.columns:
         lines_df = lines_df[lines_df["market"].isin(supported_markets)]
+
+    # Filter to specific bookmaker if requested
+    if bookmaker_filter and "bookmaker" in lines_df.columns:
+        mask = lines_df["bookmaker"].str.lower() == bookmaker_filter.lower()
+        lines_df = lines_df[mask]
+        if lines_df.empty:
+            available = lines_df["bookmaker"].unique().tolist() if not lines_df.empty else []
+            print(f"[screener] No lines found for bookmaker '{bookmaker_filter}'. Exiting.")
+            return pd.DataFrame()
 
     print(f"[screener] {len(lines_df)} prop lines across {lines_df['market'].nunique() if 'market' in lines_df.columns else 1} market(s).")
 
@@ -527,13 +538,19 @@ if __name__ == "__main__":
     parser.add_argument("--min-edge", type=float, default=MIN_EDGE_PCT, help="Minimum edge %% to flag")
     parser.add_argument("--min-diff", type=float, default=MIN_LINE_DIFF, help="Min |prediction - line| pts")
     parser.add_argument("--debug", action="store_true", help="Print prediction vs line debug table")
+    bk_group = parser.add_mutually_exclusive_group()
+    bk_group.add_argument("--draftkings", action="store_true", help="Only show DraftKings lines")
+    bk_group.add_argument("--bookmaker", type=str, default=None, help="Filter to a specific bookmaker (e.g. draftkings, fanduel)")
     args = parser.parse_args()
+
+    bookmaker = "draftkings" if args.draftkings else args.bookmaker
 
     bets = run_screener(
         bankroll=args.bankroll,
         min_edge=args.min_edge,
         min_diff=args.min_diff,
         debug=args.debug,
+        bookmaker_filter=bookmaker,
     )
 
     print("\n" + "=" * 90)
