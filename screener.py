@@ -331,7 +331,7 @@ def run_screener(
                 if _p and _m:
                     active_bets.add((_p, _m))
             if active_bets:
-                print(f"[screener] Skipping {len(active_bets)} market(s) already in play.")
+                print(f"[screener] {len(active_bets)} market(s) already in play (marked with *).")
         except Exception:
             pass
 
@@ -347,11 +347,6 @@ def run_screener(
         if not player or key in seen_keys:
             continue
         seen_keys.add(key)
-
-        # Skip bets we're already in
-        nba_player_check = norm_to_nba.get(_norm(player), player)
-        if (nba_player_check, market) in active_bets:
-            continue
 
         line = row.get("line")
         if pd.isna(line):
@@ -395,6 +390,8 @@ def run_screener(
         )
 
         if result:
+            nba_player_check = norm_to_nba.get(_norm(player), player)
+            result["in_play"] = (nba_player_check, market) in active_bets
             results.append(result)
 
     unique_players = len({k[0] for k in seen_keys})
@@ -677,6 +674,10 @@ def format_output(df: pd.DataFrame) -> str:
         return "No +EV bets found for today."
 
     display = df.copy()
+    if "in_play" in display.columns:
+        display["player"] = display.apply(
+            lambda r: f"* {r['player']}" if r.get("in_play") else r["player"], axis=1
+        )
     display["edge%"] = display["edge_pct"].apply(lambda x: f"+{x:.1f}%")
     display["kelly%"] = display["kelly_pct"].apply(lambda x: f"{x:.2f}%")
     display["bet_$"] = display["bet_dollars"].apply(lambda x: f"${x:.2f}")
