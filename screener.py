@@ -612,6 +612,11 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
 
     print("\n" + "=" * 60)
     print("Which bets did you place?")
+    for i, (_, row) in enumerate(bets_df.iterrows(), 1):
+        mkt = str(row.get("market", "")).replace("player_", "")
+        book = str(row.get("bookmaker", "?"))
+        in_play = " *" if row.get("in_play") else ""
+        print(f"  {i}. {row['player']}{in_play} | {mkt} | {row['side']} {row['line']} @ {int(row['odds']):+d} | {book} | ${row['bet_dollars']:.2f}")
     print("Enter row numbers (e.g. 1,3) or press Enter to skip:")
     try:
         raw = input("> ").strip()
