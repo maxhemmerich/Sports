@@ -486,7 +486,8 @@ def prompt_update_results() -> None:
     for i, (_, row) in enumerate(pending_list, 1):
         mkt = str(row.get("market", "")).replace("player_", "")
         odds_str = f"{int(row['odds']):+d}" if not pd.isna(row.get("odds")) else "?"
-        print(f"  {i}. {row['date']} | {row['player']} | {mkt} | {row['side']} {row['line']} @ {odds_str} | ${float(row['entered_$']):.2f}")
+        book = str(row.get("bookmaker", "?"))
+        print(f"  {i}. {row['date']} | {row['player']} | {mkt} | {row['side']} {row['line']} @ {odds_str} | {book} | ${float(row['entered_$']):.2f}")
 
     print("Enter row numbers to settle (e.g. 1,3) or Enter to skip:")
     try:
