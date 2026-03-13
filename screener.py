@@ -219,7 +219,7 @@ def screen_player(
     dec_odds = american_to_decimal(price_col)
 
     kf = kelly_fraction(win_prob, dec_odds, edge_pct=edge_pct)
-    bet_dollars = round(kf * BANKROLL, 2)
+    bet_dollars = round(kf * BANKROLL)
 
     return {
         "player": player_name,
@@ -459,7 +459,7 @@ def run_screener(
     total_raw = bets_df["bet_dollars"].sum()
     if total_raw > max_exposure:
         scale = max_exposure / total_raw
-        bets_df["bet_dollars"] = (bets_df["bet_dollars"] * scale).round(2)
+        bets_df["bet_dollars"] = (bets_df["bet_dollars"] * scale).round(0)
         bets_df["kelly_pct"] = (bets_df["kelly_pct"] * scale).round(3)
         print(f"[screener] Scaled bets by {scale:.3f}x — total capped at ${max_exposure:.2f} ({MAX_TOTAL_EXPOSURE*100:.0f}% of bankroll)")
 
@@ -677,7 +677,7 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
         mkt = str(row.get("market", "")).replace("player_", "")
         book = str(row.get("bookmaker", "?"))
         in_play = " *" if row.get("in_play") else ""
-        print(f"  {i}. {row['player']}{in_play} | {mkt} | {row['side']} {row['line']} @ {int(row['odds']):+d} | {book} | ${row['bet_dollars']:.2f}")
+        print(f"  {i}. {row['player']}{in_play} | {mkt} | {row['side']} {row['line']} @ {int(row['odds']):+d} | {book} | ${int(row['bet_dollars'])}")
     print("Enter row numbers (e.g. 1,3) or press Enter to skip:")
     try:
         raw = input("> ").strip()
@@ -703,7 +703,7 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
         label = f"  {row['player']} | {row.get('market','').replace('player_','')} | {row['side']} {row['line']} @ {int(row['odds']):+d}"
         print(label)
         try:
-            amt_raw = input(f"    Amount bet ($, or Enter to use suggested ${row['bet_dollars']:.2f}): ").strip()
+            amt_raw = input(f"    Amount bet ($, or Enter to use suggested ${int(row['bet_dollars'])}): ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         entered = float(amt_raw) if amt_raw else row["bet_dollars"]
@@ -745,7 +745,7 @@ def format_output(df: pd.DataFrame) -> str:
         display["player"] = display.apply(
             lambda r: f"* {r['player']}" if r.get("in_play") else r["player"], axis=1
         )
-    display["bet_$"] = display["bet_dollars"].apply(lambda x: f"${x:.2f}")
+    display["bet_$"] = display["bet_dollars"].apply(lambda x: f"${int(x)}")
     display["odds"] = display["odds"].apply(lambda x: f"{int(x):+d}" if not pd.isna(x) else "N/A")
     display["market"] = display["market"].apply(lambda x: str(x).replace("player_", ""))
 
