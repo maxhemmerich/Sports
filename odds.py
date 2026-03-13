@@ -61,17 +61,8 @@ def _get(path: str, params: dict | None = None) -> dict | list:
 
 def fetch_today_events() -> list[dict]:
     """
-    Return NBA events commencing within the next 48 hours.
-    Uses a 48-hour window (not just today's date string) so UTC timestamps
-    never cause games to be missed due to timezone offset.
+    Return NBA events commencing within the next 48 hours (always live).
     """
-    today = date.today().isoformat()
-    cache = DATA_DIR / f"events_{today}.json"
-    if cache.exists():
-        print(f"  [cache] Events loaded from {cache}")
-        with open(cache) as f:
-            return json.load(f)
-
     now_utc = datetime.now(timezone.utc)
     window_end = now_utc + timedelta(hours=48)
 
@@ -84,38 +75,27 @@ def fetch_today_events() -> list[dict]:
         if not commence_str:
             continue
         try:
-            # Format: '2026-03-10T00:30:00Z'
             commence_dt = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
         except ValueError:
             continue
         if now_utc <= commence_dt <= window_end:
             upcoming.append(ev)
 
-    with open(cache, "w") as f:
-        json.dump(upcoming, f, indent=2)
-    print(f"  [saved] {len(upcoming)} events in next 48h → {cache}")
+    print(f"  [api] {len(upcoming)} events in next 48h")
     return upcoming
 
 
 def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
     """
-    Fetch player prop lines for a single event.
+    Fetch player prop lines for a single event live from the API.
     Tries SharpAPI first (better Pinnacle/bet365 coverage) then falls back to Odds API.
     Returns raw bookmaker data list.
     """
-    mkt_key = MARKETS.replace(",", "_")
-    cache = DATA_DIR / f"props_{event_id}_{event_date}_{mkt_key}.json"
-    if cache.exists():
-        with open(cache) as f:
-            return json.load(f)
-
     # Try SharpAPI if configured
     if SHARP_API_KEY and SHARP_BASE_URL:
         sharp_books = _fetch_sharp_props_nba()
         if sharp_books:
             print(f"    [sharp] Using SharpAPI data ({len(sharp_books)} books)")
-            with open(cache, "w") as f:
-                json.dump(sharp_books, f, indent=2)
             return sharp_books
 
     time.sleep(REQUEST_DELAY)
@@ -125,8 +105,6 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
             "regions": REGIONS,
             "markets": MARKETS,
             "oddsFormat": "american",
-            # No bookmakers filter — take everything the API returns,
-            # then prefer Pinnacle/bet365 in parse_props if available.
         },
     )
     bookmakers = data.get("bookmakers", [])
@@ -135,8 +113,6 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
         print(f"    [books] {available}")
     else:
         print(f"    [warn] No bookmakers returned for this event")
-    with open(cache, "w") as f:
-        json.dump(bookmakers, f, indent=2)
     return bookmakers
 
 
@@ -183,38 +159,12 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
     return merged.reset_index(drop=True)
 
 
-def get_today_lines(refresh: bool = False) -> pd.DataFrame:
+def get_today_lines() -> pd.DataFrame:
     """
-    Master function: fetch all of today's player_points props from
-    Pinnacle and bet365, return as a unified DataFrame.
-
-    Columns:
-        player_name, market, line, over_price, under_price,
-        bookmaker, event_id, home_team, away_team, commence_time
-
-    Pass refresh=True to delete today's cached files and re-fetch live odds.
+    Fetch today's NBA player prop lines live from the API every run.
+    Always returns current odds — no caching.
     """
     today = date.today().isoformat()
-    master_cache = DATA_DIR / f"lines_{today}.csv"
-
-    if refresh:
-        # Delete master cache
-        if master_cache.exists():
-            master_cache.unlink()
-            print(f"[odds] Cache cleared: {master_cache}")
-        # Delete per-event prop caches for today
-        for f in DATA_DIR.glob(f"props_*_{today}_*.json"):
-            f.unlink()
-            print(f"[odds] Cache cleared: {f.name}")
-        # Delete events cache for today
-        events_cache = DATA_DIR / f"events_{today}.json"
-        if events_cache.exists():
-            events_cache.unlink()
-            print(f"[odds] Cache cleared: {events_cache.name}")
-
-    if master_cache.exists():
-        print(f"[odds] Loading today's lines from cache: {master_cache}")
-        return pd.read_csv(master_cache)
 
     events = fetch_today_events()
     if not events:
@@ -245,10 +195,7 @@ def get_today_lines(refresh: bool = False) -> pd.DataFrame:
         print("[odds] No prop lines found for today's games.")
         return pd.DataFrame()
 
-    combined = pd.concat(all_frames, ignore_index=True)
-    combined.to_csv(master_cache, index=False)
-    print(f"[odds] {len(combined)} prop rows → {master_cache}")
-    return combined
+    return pd.concat(all_frames, ignore_index=True)
 
 
 def american_to_decimal(american: float) -> float:

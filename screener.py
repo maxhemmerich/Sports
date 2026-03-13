@@ -243,7 +243,6 @@ def run_screener(
     min_diff: float = MIN_LINE_DIFF,
     debug: bool = False,
     bookmaker_filter: list[str] | str | None = None,
-    refresh: bool = False,
 ) -> pd.DataFrame:
     """
     Main screener pipeline.
@@ -283,7 +282,7 @@ def run_screener(
     print(f"[screener] Models loaded: {list(models.keys())}")
 
     # Load today's lines (all markets)
-    lines_df = get_today_lines(refresh=refresh)
+    lines_df = get_today_lines()
     if lines_df.empty:
         print("[screener] No lines available for today. Exiting.")
         return pd.DataFrame()
@@ -761,7 +760,6 @@ if __name__ == "__main__":
     parser.add_argument("--min-edge", type=float, default=MIN_EDGE_PCT, help="Minimum edge %% to flag")
     parser.add_argument("--min-diff", type=float, default=MIN_LINE_DIFF, help="Min |prediction - line| pts")
     parser.add_argument("--debug", action="store_true", help="Print prediction vs line debug table")
-    parser.add_argument("--refresh", action="store_true", help="Bust today's odds cache and re-fetch live lines")
     bk_group = parser.add_mutually_exclusive_group()
     bk_group.add_argument("--draftkings", action="store_true", help="Only show DraftKings lines (skips prompt)")
     bk_group.add_argument("--bookmaker", type=str, default=None, help="Filter to a specific bookmaker (skips prompt)")
@@ -784,7 +782,7 @@ if __name__ == "__main__":
     else:
         # Fetch lines once just to show available books for the prompt
         from odds import get_today_lines as _get_lines
-        _lines_preview = _get_lines(refresh=args.refresh)
+        _lines_preview = _get_lines()
         bookmaker = prompt_bookmaker(_lines_preview)
 
     bets = run_screener(
@@ -793,7 +791,6 @@ if __name__ == "__main__":
         min_diff=args.min_diff,
         debug=args.debug,
         bookmaker_filter=bookmaker,
-        refresh=False,  # already refreshed above if needed
     )
 
     print("\n" + "=" * 90)
