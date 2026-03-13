@@ -683,7 +683,7 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
         book = str(row.get("bookmaker", "?"))
         in_play = " *" if row.get("in_play") else ""
         print(f"  {i}. {row['player']}{in_play} | {mkt} | {row['side']} {row['line']} @ {int(row['odds']):+d} | {book} | ${int(row['bet_dollars'])}")
-    print("Enter row numbers (e.g. 1,3) or press Enter to skip:")
+    print("Enter slip (row# $amount ...), e.g.  1 $10 2 $5 3 $15  — or press Enter to skip:")
     try:
         raw = input("> ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -692,26 +692,37 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
     if not raw:
         return
 
-    try:
-        indices = [int(x.strip()) - 1 for x in raw.split(",") if x.strip()]
-    except ValueError:
-        print("[tracker] Invalid input — skipping.")
+    # Parse "1 $10 2 $5 3 $15" or "1 10, 2 5, 3 15" etc.
+    import re as _re
+    tokens = _re.sub(r"[$,]", " ", raw).split()
+    slip: dict[int, float] = {}
+    i = 0
+    while i < len(tokens):
+        if tokens[i].isdigit():
+            row_num = int(tokens[i])
+            if i + 1 < len(tokens):
+                try:
+                    amt = float(tokens[i + 1])
+                    slip[row_num] = amt
+                    i += 2
+                    continue
+                except ValueError:
+                    pass
+        i += 1
+
+    if not slip:
+        print("[tracker] Could not parse slip — skipping.")
         return
 
     logged = []
     today = date.today().isoformat()
-    for idx in indices:
+    for row_num, entered in sorted(slip.items()):
+        idx = row_num - 1
         if idx < 0 or idx >= len(bets_df):
-            print(f"  [skip] Row {idx + 1} out of range.")
+            print(f"  [skip] Row {row_num} out of range.")
             continue
         row = bets_df.iloc[idx]
-        label = f"  {row['player']} | {row.get('market','').replace('player_','')} | {row['side']} {row['line']} @ {int(row['odds']):+d}"
-        print(label)
-        try:
-            amt_raw = input(f"    Amount bet ($, or Enter to use suggested ${int(row['bet_dollars'])}): ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-        entered = float(amt_raw) if amt_raw else row["bet_dollars"]
+        print(f"  {row['player']} | {row.get('market','').replace('player_','')} | {row['side']} {row['line']} @ {int(row['odds']):+d} — ${entered:.0f}")
         logged.append({
             "date": today,
             "player": row["player"],
