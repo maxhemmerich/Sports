@@ -243,6 +243,7 @@ def run_screener(
     min_diff: float = MIN_LINE_DIFF,
     debug: bool = False,
     bookmaker_filter: list[str] | str | None = None,
+    lines_df: "pd.DataFrame | None" = None,
 ) -> pd.DataFrame:
     """
     Main screener pipeline.
@@ -281,8 +282,9 @@ def run_screener(
             models[market] = load_model(target=target)
     print(f"[screener] Models loaded: {list(models.keys())}")
 
-    # Load today's lines (all markets)
-    lines_df = get_today_lines()
+    # Load today's lines (all markets) — reuse passed-in data to avoid double API fetch
+    if lines_df is None:
+        lines_df = get_today_lines()
     if lines_df.empty:
         print("[screener] No lines available for today. Exiting.")
         return pd.DataFrame()
@@ -462,6 +464,9 @@ def run_screener(
         bets_df["bet_dollars"] = (bets_df["bet_dollars"] * scale).round(0)
         bets_df["kelly_pct"] = (bets_df["kelly_pct"] * scale).round(3)
         print(f"[screener] Scaled bets by {scale:.3f}x — total capped at ${max_exposure:.2f} ({MAX_TOTAL_EXPOSURE*100:.0f}% of bankroll)")
+
+    # Drop bets that round to $0 — not actionable
+    bets_df = bets_df[bets_df["bet_dollars"] >= 1].reset_index(drop=True)
 
     # Save results
     today = date.today().isoformat()
@@ -775,12 +780,13 @@ if __name__ == "__main__":
         bankroll = prompt_bankroll()
 
     # Bookmaker selection: CLI flag takes precedence, otherwise interactive prompt
+    _lines_preview = None
     if args.draftkings:
         bookmaker = ["draftkings"]
     elif args.bookmaker:
         bookmaker = [args.bookmaker]
     else:
-        # Fetch lines once just to show available books for the prompt
+        # Fetch lines once just to show available books for the prompt; reuse in screener
         from odds import get_today_lines as _get_lines
         _lines_preview = _get_lines()
         bookmaker = prompt_bookmaker(_lines_preview)
@@ -791,6 +797,7 @@ if __name__ == "__main__":
         min_diff=args.min_diff,
         debug=args.debug,
         bookmaker_filter=bookmaker,
+        lines_df=_lines_preview,
     )
 
     print("\n" + "=" * 90)
