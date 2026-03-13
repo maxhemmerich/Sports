@@ -241,7 +241,8 @@ def run_screener(
     min_edge: float = MIN_EDGE_PCT,
     min_diff: float = MIN_LINE_DIFF,
     debug: bool = False,
-    bookmaker_filter: str | None = None,
+    bookmaker_filter: list[str] | str | None = None,
+    refresh: bool = False,
 ) -> pd.DataFrame:
     """
     Main screener pipeline.
@@ -257,9 +258,13 @@ def run_screener(
     MIN_LINE_DIFF = min_diff
     max_exposure = MAX_TOTAL_EXPOSURE * bankroll
 
+    # Normalize bookmaker_filter to a list or None
+    if isinstance(bookmaker_filter, str):
+        bookmaker_filter = [bookmaker_filter]
+
     print("=== NBA Props Screener ===")
-    print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts"
-          + (f"  |  Bookmaker: {bookmaker_filter}" if bookmaker_filter else ""))
+    bk_label = ", ".join(bookmaker_filter) if bookmaker_filter else "all"
+    print(f"Bankroll: ${BANKROLL:.2f}  |  Min edge: {MIN_EDGE_PCT}%  |  Min diff: {MIN_LINE_DIFF} pts  |  Books: {bk_label}")
 
     # Load models for each market (auto-train if missing or stale)
     from model import _train_target, load_training_data as _ltd, train as _train, save_model as _save, is_model_stale
@@ -277,7 +282,7 @@ def run_screener(
     print(f"[screener] Models loaded: {list(models.keys())}")
 
     # Load today's lines (all markets)
-    lines_df = get_today_lines()
+    lines_df = get_today_lines(refresh=refresh)
     if lines_df.empty:
         print("[screener] No lines available for today. Exiting.")
         return pd.DataFrame()
@@ -287,13 +292,13 @@ def run_screener(
     if "market" in lines_df.columns:
         lines_df = lines_df[lines_df["market"].isin(supported_markets)]
 
-    # Filter to specific bookmaker if requested
+    # Filter to specific bookmaker(s) if requested
     if bookmaker_filter and "bookmaker" in lines_df.columns:
-        mask = lines_df["bookmaker"].str.lower() == bookmaker_filter.lower()
+        lower_filter = [b.lower() for b in bookmaker_filter]
+        mask = lines_df["bookmaker"].str.lower().isin(lower_filter)
         lines_df = lines_df[mask]
         if lines_df.empty:
-            available = lines_df["bookmaker"].unique().tolist() if not lines_df.empty else []
-            print(f"[screener] No lines found for bookmaker '{bookmaker_filter}'. Exiting.")
+            print(f"[screener] No lines found for bookmaker(s): {bookmaker_filter}. Exiting.")
             return pd.DataFrame()
 
     print(f"[screener] {len(lines_df)} prop lines across {lines_df['market'].nunique() if 'market' in lines_df.columns else 1} market(s).")
@@ -562,10 +567,11 @@ def prompt_bankroll() -> float:
     return bankroll
 
 
-def prompt_bookmaker(lines_df: pd.DataFrame) -> str | None:
+def prompt_bookmaker(lines_df: pd.DataFrame) -> list[str] | None:
     """
-    Show available bookmakers from today's lines and let the user pick one (or all).
-    Returns the selected bookmaker string, or None for all books.
+    Show available bookmakers from today's lines and let the user pick one or more (or all).
+    Returns a list of selected bookmaker strings, or None for all books.
+    Supports comma-separated numbers (e.g. "1,3") or a single name.
     """
     if "bookmaker" not in lines_df.columns:
         return None
@@ -574,29 +580,39 @@ def prompt_bookmaker(lines_df: pd.DataFrame) -> str | None:
         return None
 
     print(f"\n{'=' * 60}")
-    print("Available bookmakers:")
+    print("Available bookmakers (enter number(s), e.g. 1,3):")
     for i, b in enumerate(books, 1):
         print(f"  {i}. {b}")
     print(f"  {len(books) + 1}. All bookmakers")
-    print("Select (number or name, Enter for all):")
+    print("Select (Enter for all):")
     try:
         raw = input("> ").strip()
     except (EOFError, KeyboardInterrupt):
         return None
     if not raw:
         return None
-    try:
-        idx = int(raw) - 1
-        if idx == len(books):
-            return None
-        if 0 <= idx < len(books):
-            return books[idx]
-    except ValueError:
-        matched = [b for b in books if raw.lower() in b.lower()]
-        if len(matched) == 1:
-            return matched[0]
-        if matched:
-            print(f"  Ambiguous: {matched} — using all.")
+
+    # Try comma-separated numbers first
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    selected = []
+    all_numeric = all(p.isdigit() for p in parts)
+    if all_numeric:
+        for p in parts:
+            idx = int(p) - 1
+            if idx == len(books):
+                return None  # "All"
+            if 0 <= idx < len(books):
+                selected.append(books[idx])
+            else:
+                print(f"  [skip] {p} out of range.")
+        return selected if selected else None
+
+    # Fall back to name matching (single token)
+    matched = [b for b in books if raw.lower() in b.lower()]
+    if len(matched) == 1:
+        return [matched[0]]
+    if matched:
+        print(f"  Ambiguous: {matched} — using all.")
     return None
 
 
@@ -701,6 +717,7 @@ if __name__ == "__main__":
     parser.add_argument("--min-edge", type=float, default=MIN_EDGE_PCT, help="Minimum edge %% to flag")
     parser.add_argument("--min-diff", type=float, default=MIN_LINE_DIFF, help="Min |prediction - line| pts")
     parser.add_argument("--debug", action="store_true", help="Print prediction vs line debug table")
+    parser.add_argument("--refresh", action="store_true", help="Bust today's odds cache and re-fetch live lines")
     bk_group = parser.add_mutually_exclusive_group()
     bk_group.add_argument("--draftkings", action="store_true", help="Only show DraftKings lines (skips prompt)")
     bk_group.add_argument("--bookmaker", type=str, default=None, help="Filter to a specific bookmaker (skips prompt)")
@@ -717,13 +734,13 @@ if __name__ == "__main__":
 
     # Bookmaker selection: CLI flag takes precedence, otherwise interactive prompt
     if args.draftkings:
-        bookmaker = "draftkings"
+        bookmaker = ["draftkings"]
     elif args.bookmaker:
-        bookmaker = args.bookmaker
+        bookmaker = [args.bookmaker]
     else:
         # Fetch lines once just to show available books for the prompt
         from odds import get_today_lines as _get_lines
-        _lines_preview = _get_lines()
+        _lines_preview = _get_lines(refresh=args.refresh)
         bookmaker = prompt_bookmaker(_lines_preview)
 
     bets = run_screener(
@@ -732,6 +749,7 @@ if __name__ == "__main__":
         min_diff=args.min_diff,
         debug=args.debug,
         bookmaker_filter=bookmaker,
+        refresh=False,  # already refreshed above if needed
     )
 
     print("\n" + "=" * 90)

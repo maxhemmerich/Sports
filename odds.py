@@ -197,7 +197,7 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
     return best
 
 
-def get_today_lines() -> pd.DataFrame:
+def get_today_lines(refresh: bool = False) -> pd.DataFrame:
     """
     Master function: fetch all of today's player_points props from
     Pinnacle and bet365, return as a unified DataFrame.
@@ -205,9 +205,27 @@ def get_today_lines() -> pd.DataFrame:
     Columns:
         player_name, market, line, over_price, under_price,
         bookmaker, event_id, home_team, away_team, commence_time
+
+    Pass refresh=True to delete today's cached files and re-fetch live odds.
     """
     today = date.today().isoformat()
     master_cache = DATA_DIR / f"lines_{today}.csv"
+
+    if refresh:
+        # Delete master cache
+        if master_cache.exists():
+            master_cache.unlink()
+            print(f"[odds] Cache cleared: {master_cache}")
+        # Delete per-event prop caches for today
+        for f in DATA_DIR.glob(f"props_*_{today}_*.json"):
+            f.unlink()
+            print(f"[odds] Cache cleared: {f.name}")
+        # Delete events cache for today
+        events_cache = DATA_DIR / f"events_{today}.json"
+        if events_cache.exists():
+            events_cache.unlink()
+            print(f"[odds] Cache cleared: {events_cache.name}")
+
     if master_cache.exists():
         print(f"[odds] Loading today's lines from cache: {master_cache}")
         return pd.read_csv(master_cache)
