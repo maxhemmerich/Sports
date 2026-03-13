@@ -143,8 +143,8 @@ def fetch_event_props(event_id: str, event_date: str) -> list[dict]:
 def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
     """
     Parse raw bookmaker JSON into a flat DataFrame.
-    Prefers PREFERRED_BOOKS (Pinnacle/bet365) when available;
-    otherwise keeps the best-priced line from any available book.
+    Keeps ALL bookmakers — one row per player/market/line/bookmaker.
+    Bookmaker filtering happens downstream in the screener.
 
     Returns columns:
         player_name, market, line, over_price, under_price, bookmaker
@@ -180,21 +180,7 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
         on=["player_name", "market", "line", "bookmaker"],
         how="outer",
     )
-
-    # For each player, keep preferred book if present, else best over_price
-    def pick_best(grp: pd.DataFrame) -> pd.Series:
-        preferred = grp[grp["bookmaker"].isin(PREFERRED_BOOKS)]
-        if not preferred.empty:
-            return preferred.iloc[0]
-        # Fall back to book with best (highest) over_price
-        return grp.loc[grp["over_price"].idxmax()] if grp["over_price"].notna().any() else grp.iloc[0]
-
-    best = (
-        merged.groupby(["player_name", "market", "line"], group_keys=False)
-        .apply(pick_best)
-        .reset_index(drop=True)
-    )
-    return best
+    return merged.reset_index(drop=True)
 
 
 def get_today_lines(refresh: bool = False) -> pd.DataFrame:

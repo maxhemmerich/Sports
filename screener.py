@@ -41,6 +41,7 @@ MIN_SEASON_GAMES = int(os.getenv("MIN_SEASON_GAMES", "15"))  # min games in curr
 CURRENT_SEASON_START = "2025-10-01"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
+STATE_PATH = RESULTS_DIR / "state.json"
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
 SIGMA_BY_MARKET = {
@@ -341,14 +342,15 @@ def run_screener(
             pass
 
     results = []
-    # seen key = (player_raw, market) so same player can have pts + reb + ast
+    # seen key = (player_raw, market, bookmaker) — evaluate each book's line independently
     seen_keys = set()
     n_no_history = 0
 
     for _, row in lines_df.iterrows():
         player = row.get("player_name", "")
         market = row.get("market", "player_points")
-        key = (player, market)
+        bookmaker_key = row.get("bookmaker", "unknown")
+        key = (player, market, bookmaker_key)
         if not player or key in seen_keys:
             continue
         seen_keys.add(key)
@@ -399,7 +401,7 @@ def run_screener(
             result["in_play"] = (nba_player_check, market) in active_bets
             results.append(result)
 
-    unique_players = len({k[0] for k in seen_keys})
+    unique_players = len({k[0] for k in seen_keys})  # k = (player, market, bookmaker)
     print(f"[screener] Lines evaluated: {len(seen_keys)} | "
           f"Players matched: {unique_players} | "
           f"No history: {n_no_history} | "
@@ -530,34 +532,78 @@ def prompt_update_results() -> None:
     print(f"[tracker] Results saved → {TRACKER_PATH}")
 
 
+def _load_state() -> dict:
+    if STATE_PATH.exists():
+        try:
+            import json as _json
+            return _json.loads(STATE_PATH.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_state(data: dict) -> None:
+    import json as _json
+    existing = _load_state()
+    existing.update(data)
+    STATE_PATH.write_text(_json.dumps(existing, indent=2))
+
+
 def prompt_bankroll() -> float:
     """
     Ask for current cash balance, then add unsettled bet amounts to get total bankroll.
-    Falls back to BANKROLL constant if skipped.
+    Default = last saved cash balance minus any bets logged since it was saved.
     """
+    state = _load_state()
+    saved_cash = state.get("cash_balance")
+
+    # Compute bets logged since the last balance save
+    logged_since = 0.0
+    if saved_cash is not None and TRACKER_PATH.exists():
+        try:
+            df = pd.read_csv(TRACKER_PATH)
+            after_ts = state.get("balance_saved_at", "")
+            if after_ts and "logged_at" in df.columns:
+                df = df[df["logged_at"] > after_ts]
+            # Use all unsettled bets as proxy when no timestamp column
+            elif "entered_$" in df.columns:
+                pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
+                logged_since = pending["entered_$"].fillna(0).sum()
+        except Exception:
+            pass
+
+    default_cash = (saved_cash - logged_since) if saved_cash is not None else BANKROLL
+
     print(f"\n{'=' * 60}")
     print("Enter your current cash balance (or Enter to use default):")
     try:
-        raw = input(f"  Cash balance [${BANKROLL:.2f}]: ").strip()
+        raw = input(f"  Cash balance [${default_cash:.2f}]: ").strip()
     except (EOFError, KeyboardInterrupt):
-        return BANKROLL
+        return default_cash
 
     if not raw:
-        cash = BANKROLL
+        cash = default_cash
     else:
         try:
             cash = float(raw.replace("$", "").replace(",", ""))
         except ValueError:
-            print(f"  Invalid — using default ${BANKROLL:.2f}")
-            cash = BANKROLL
+            print(f"  Invalid — using ${default_cash:.2f}")
+            cash = default_cash
 
-    # Add unsettled bets (money currently at risk)
+    # Save the entered cash balance
+    from datetime import datetime as _dt
+    _save_state({"cash_balance": cash, "balance_saved_at": _dt.now().isoformat()})
+
+    # Add unsettled bets (money currently at risk) to get total bankroll
     at_risk = 0.0
     if TRACKER_PATH.exists():
-        df = pd.read_csv(TRACKER_PATH)
-        pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
-        if not pending.empty and "entered_$" in pending.columns:
-            at_risk = pending["entered_$"].fillna(0).sum()
+        try:
+            df = pd.read_csv(TRACKER_PATH)
+            pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
+            if not pending.empty and "entered_$" in pending.columns:
+                at_risk = pending["entered_$"].fillna(0).sum()
+        except Exception:
+            pass
 
     bankroll = cash + at_risk
     if at_risk > 0:
@@ -700,13 +746,11 @@ def format_output(df: pd.DataFrame) -> str:
         display["player"] = display.apply(
             lambda r: f"* {r['player']}" if r.get("in_play") else r["player"], axis=1
         )
-    display["edge%"] = display["edge_pct"].apply(lambda x: f"+{x:.1f}%")
-    display["kelly%"] = display["kelly_pct"].apply(lambda x: f"{x:.2f}%")
     display["bet_$"] = display["bet_dollars"].apply(lambda x: f"${x:.2f}")
     display["odds"] = display["odds"].apply(lambda x: f"{int(x):+d}" if not pd.isna(x) else "N/A")
-    display["prediction"] = display["prediction"].apply(lambda x: f"{x:.1f}")
+    display["market"] = display["market"].apply(lambda x: str(x).replace("player_", ""))
 
-    cols = ["player", "market", "line", "prediction", "edge%", "side", "odds", "bookmaker", "kelly%", "bet_$", "game"]
+    cols = ["bookmaker", "player", "market", "line", "side", "odds", "bet_$", "game"]
     avail = [c for c in cols if c in display.columns]
     return display[avail].to_string(index=False)
 
