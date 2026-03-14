@@ -42,6 +42,8 @@ CURRENT_SEASON_START = "2025-10-01"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
+DEFAULT_BOOKS = ["draftkings", "fanduel"]
+LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "1800"))  # seconds between screener runs (default 30 min)
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
 SIGMA_BY_MARKET = {
@@ -561,13 +563,25 @@ def auto_settle_bets() -> None:
             result = "PUSH"
 
         df.at[orig_idx, "result"] = result
+
+        # Update running bankroll
+        stake = float(row.get("entered_$", 0))
+        if result == "WIN":
+            dec = american_to_decimal(float(row["odds"]))
+            delta = stake * (dec - 1)  # net profit; stake was already deducted when bet was logged
+        elif result == "PUSH":
+            delta = stake  # return stake
+        else:
+            delta = 0.0   # LOSS — stake already gone
+        _update_bankroll(delta)
+
         mkt_short = market.replace("player_", "")
-        print(f"  [auto] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}")
+        bankroll_now = _get_bankroll()
+        print(f"  [settled] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}  |  bankroll ${bankroll_now:.0f}")
         settled_count += 1
 
     if settled_count > 0:
         df.to_csv(TRACKER_PATH, index=False)
-        print(f"[auto-settle] {settled_count} bet(s) settled automatically → {TRACKER_PATH}")
 
     if not_found:
         print(f"[auto-settle] Could not find stats for: {', '.join(not_found)}")
@@ -622,7 +636,17 @@ def prompt_update_results() -> None:
         result = result_map.get(raw_result)
         if result:
             df.at[orig_idx, "result"] = result
-            print(f"    → {result}")
+            # Update bankroll
+            stake = float(row.get("entered_$", 0))
+            if result == "WIN":
+                dec = american_to_decimal(float(row["odds"]))
+                delta = stake * (dec - 1)
+            elif result == "PUSH":
+                delta = stake
+            else:
+                delta = 0.0
+            new_br = _update_bankroll(delta)
+            print(f"    → {result}  |  bankroll ${new_br:.0f}")
         else:
             print(f"    Unrecognized '{raw_result}' — skipping.")
 
@@ -647,68 +671,21 @@ def _save_state(data: dict) -> None:
     STATE_PATH.write_text(_json.dumps(existing, indent=2))
 
 
-def prompt_bankroll() -> float:
-    """
-    Ask for current cash balance, then add unsettled bet amounts to get total bankroll.
-    Default = last saved cash balance minus any bets logged since it was saved.
-    """
+def _get_bankroll() -> float:
+    """Return current bankroll from state, initialising from BANKROLL env on first run."""
     state = _load_state()
-    saved_cash = state.get("cash_balance")
+    if "bankroll" not in state:
+        _save_state({"bankroll": BANKROLL})
+        return BANKROLL
+    return float(state["bankroll"])
 
-    # Compute bets logged since the last balance save
-    logged_since = 0.0
-    if saved_cash is not None and TRACKER_PATH.exists():
-        try:
-            df = pd.read_csv(TRACKER_PATH)
-            after_ts = state.get("balance_saved_at", "")
-            if after_ts and "logged_at" in df.columns:
-                df = df[df["logged_at"] > after_ts]
-            # Use all unsettled bets as proxy when no timestamp column
-            elif "entered_$" in df.columns:
-                pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
-                logged_since = pending["entered_$"].fillna(0).sum()
-        except Exception:
-            pass
 
-    default_cash = (saved_cash - logged_since) if saved_cash is not None else BANKROLL
-
-    print(f"\n{'=' * 60}")
-    print("Enter your current cash balance (or Enter to use default):")
-    try:
-        raw = input(f"  Cash balance [${default_cash:.2f}]: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        return default_cash
-
-    if not raw:
-        cash = default_cash
-    else:
-        try:
-            cash = float(raw.replace("$", "").replace(",", ""))
-        except ValueError:
-            print(f"  Invalid — using ${default_cash:.2f}")
-            cash = default_cash
-
-    # Save the entered cash balance
-    from datetime import datetime as _dt
-    _save_state({"cash_balance": cash, "balance_saved_at": _dt.now().isoformat()})
-
-    # Add unsettled bets (money currently at risk) to get total bankroll
-    at_risk = 0.0
-    if TRACKER_PATH.exists():
-        try:
-            df = pd.read_csv(TRACKER_PATH)
-            pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
-            if not pending.empty and "entered_$" in pending.columns:
-                at_risk = pending["entered_$"].fillna(0).sum()
-        except Exception:
-            pass
-
-    bankroll = cash + at_risk
-    if at_risk > 0:
-        print(f"  Cash: ${cash:.2f}  +  At risk (unsettled): ${at_risk:.2f}  =  Bankroll: ${bankroll:.2f}")
-    else:
-        print(f"  Bankroll: ${bankroll:.2f}")
-    return bankroll
+def _update_bankroll(delta: float) -> float:
+    """Add delta to stored bankroll and return the new value."""
+    current = _get_bankroll()
+    new = current + delta
+    _save_state({"bankroll": new})
+    return new
 
 
 def prompt_bookmaker(lines_df: pd.DataFrame) -> list[str] | None:
@@ -841,8 +818,9 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
     else:
         combined = new_df
     combined.to_csv(TRACKER_PATH, index=False)
-    print(f"\n[tracker] {len(logged)} bet(s) logged → {TRACKER_PATH}")
-    print("  Update the 'result' column with WIN / LOSS / PUSH after games settle.")
+    total_staked = sum(b["entered_$"] for b in logged)
+    new_br = _update_bankroll(-total_staked)
+    print(f"\n[tracker] {len(logged)} bet(s) logged — staked ${total_staked:.0f}  |  bankroll ${new_br:.0f}")
 
 
 def format_output(df: pd.DataFrame) -> str:
@@ -865,70 +843,58 @@ def format_output(df: pd.DataFrame) -> str:
 
 
 if __name__ == "__main__":
+    import contextlib
+    import time as _time
+
     parser = argparse.ArgumentParser(description="NBA Props Screener")
-    parser.add_argument("--bankroll", type=float, default=BANKROLL, help="Current bankroll in $")
     parser.add_argument("--min-edge", type=float, default=MIN_EDGE_PCT, help="Minimum edge %% to flag")
     parser.add_argument("--min-diff", type=float, default=MIN_LINE_DIFF, help="Min |prediction - line| pts")
     parser.add_argument("--debug", action="store_true", help="Print prediction vs line debug table")
-    bk_group = parser.add_mutually_exclusive_group()
-    bk_group.add_argument("--draftkings", action="store_true", help="Only show DraftKings lines (skips prompt)")
-    bk_group.add_argument("--bookmaker", type=str, default=None, help="Filter to a specific bookmaker (skips prompt)")
+    parser.add_argument("--interval", type=int, default=LOOP_INTERVAL, help="Seconds between screener runs")
     args = parser.parse_args()
 
-    # Settle unsettled bets from previous sessions first
-    auto_settle_bets()       # auto-settle past bets from game logs
-    prompt_update_results()  # manual fallback for anything not found
+    bookmaker = DEFAULT_BOOKS  # draftkings + fanduel
 
-    # Bankroll: CLI --bankroll overrides prompt (useful for scripts/cron)
-    if args.bankroll != BANKROLL:
-        bankroll = args.bankroll
-    else:
-        bankroll = prompt_bankroll()
+    # One-time startup: settle any remaining manual bets that auto-settle missed
+    auto_settle_bets()
+    prompt_update_results()
 
-    # Bookmaker selection: CLI flag takes precedence, otherwise interactive prompt
-    _lines_preview = None
-    if args.draftkings:
-        bookmaker = ["draftkings"]
-    elif args.bookmaker:
-        bookmaker = [args.bookmaker]
-    else:
-        # Fetch lines once just to show available books for the prompt; reuse in screener
-        from odds import get_today_lines as _get_lines
-        _lines_preview = _get_lines()
-        bookmaker = prompt_bookmaker(_lines_preview)
+    def _bet_key(r: pd.Series) -> tuple:
+        return (r["player"], r["market"], r["side"], float(r["line"]), r.get("bookmaker", ""))
 
-    bets = run_screener(
-        bankroll=bankroll,
-        min_edge=args.min_edge,
-        min_diff=args.min_diff,
-        debug=args.debug,
-        bookmaker_filter=bookmaker,
-        lines_df=_lines_preview,
-    )
+    seen_keys: set = set()
 
-    print("\n" + "=" * 90)
-    print("TODAY'S FLAGGED BETS")
-    print("=" * 90)
-    print(format_output(bets))
+    print(f"[screener] Running — books: {', '.join(bookmaker)}  |  interval: {args.interval}s  |  Ctrl-C to stop")
 
-    if not bets.empty:
-        total_bet = bets["bet_dollars"].sum()
-        print(f"\nTotal allocated: ${total_bet:.2f} / ${bankroll:.2f} ({total_bet/bankroll*100:.1f}%)")
-        print(f"Bets flagged: {len(bets)}")
-        print(f"\nResults saved to: results/bets_{date.today().isoformat()}.csv")
+    while True:
+        # Auto-settle any bets that finished since last loop
+        auto_settle_bets()
 
-        # Show arbitrage opportunities if any exist
-        try:
-            from odds import get_arbitrage_opportunities
-            arb_df = get_arbitrage_opportunities()
-            if not arb_df.empty:
+        bankroll = _get_bankroll()
+
+        # Run screener silently; only surface output when something changes
+        with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
+            bets = run_screener(
+                bankroll=bankroll,
+                min_edge=args.min_edge,
+                min_diff=args.min_diff,
+                debug=args.debug,
+                bookmaker_filter=bookmaker,
+            )
+
+        if not bets.empty:
+            current_keys = {_bet_key(row) for _, row in bets.iterrows()}
+            new_keys = current_keys - seen_keys
+            if new_keys:
+                new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
                 print("\n" + "=" * 90)
-                print("ARBITRAGE OPPORTUNITIES (bet both sides across books)")
+                print(f"NEW BETS  |  bankroll ${bankroll:.0f}")
                 print("=" * 90)
-                print(arb_df.to_string(index=False))
-        except Exception:
-            pass
+                print(format_output(new_bets))
+                print()
+                prompt_and_log_bets(new_bets)
+            seen_keys = current_keys
+        else:
+            seen_keys = set()
 
-        prompt_and_log_bets(bets)
-
-    print("\n[screener.py] Done.")
+        _time.sleep(args.interval)
