@@ -923,9 +923,8 @@ if __name__ == "__main__":
 
     bookmaker = DEFAULT_BOOKS  # draftkings + fanduel
 
-    # One-time startup: settle any bets that can be auto-settled, then manual fallback
+    # One-time startup: auto-settle any past bets from game logs
     auto_settle_bets()
-    prompt_update_results()
 
     # Ask for current tradeable balance on each book (syncs with reality)
     book_balances = prompt_book_balances()
@@ -947,6 +946,9 @@ if __name__ == "__main__":
     print(f"\n[screener] Running — interval: {args.interval}s  |  Ctrl-C to stop")
 
     while True:
+        from datetime import datetime as _dt
+        print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...")
+
         # Auto-settle any bets that finished since last loop (updates book balances)
         auto_settle_bets()
         book_balances = _get_book_balances()
