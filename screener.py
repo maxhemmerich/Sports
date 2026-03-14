@@ -896,26 +896,28 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
     print(f"\n[tracker] {len(logged)} bet(s) logged  |  {summary}")
 
 
-def _notify(new_bets: pd.DataFrame) -> None:
-    """Push a notification via ntfy.sh if NTFY_TOPIC is configured."""
+def _ntfy(title: str, body: str, priority: str = "default", tags: str = "") -> None:
+    """Send a notification via ntfy.sh. No-op if NTFY_TOPIC is not set."""
     if not NTFY_TOPIC:
         return
+    try:
+        import requests as _req
+        headers = {"Title": title, "Priority": priority}
+        if tags:
+            headers["Tags"] = tags
+        _req.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=body.encode("utf-8"), headers=headers, timeout=10)
+    except Exception as _e:
+        print(f"[notify] Failed: {_e}", flush=True)
+
+
+def _notify(new_bets: pd.DataFrame) -> None:
+    """Push a new-bets notification via ntfy.sh."""
     lines = []
     for _, row in new_bets.iterrows():
         mkt = str(row.get("market", "")).replace("player_", "")
         book = str(row.get("bookmaker", ""))
         lines.append(f"{row['player']} {row['side']} {row['line']} {mkt} @ {int(row['odds']):+d} ({book}) ${int(row['bet_dollars'])}")
-    body = "\n".join(lines)
-    try:
-        import requests as _req
-        _req.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=body.encode("utf-8"),
-            headers={"Title": f"{len(new_bets)} new bet(s) flagged", "Priority": "high", "Tags": "money_with_wings"},
-            timeout=10,
-        )
-    except Exception as _e:
-        print(f"[notify] Failed: {_e}", flush=True)
+    _ntfy(f"{len(new_bets)} new bet(s) flagged", "\n".join(lines), priority="high", tags="money_with_wings")
 
 
 def format_output(df: pd.DataFrame) -> str:
@@ -981,73 +983,84 @@ if __name__ == "__main__":
     _iteration = 0
 
     print(f"\n[screener] Running — check every {args.interval}s, print every {LOOP_PRINT_EVERY} iterations  |  Ctrl-C to stop")
+    _ntfy("Screener started", f"Checking every {args.interval}s\nDK ${book_balances.get('draftkings', 0):.0f}  FD ${book_balances.get('fanduel', 0):.0f}", tags="white_check_mark")
 
     from datetime import datetime as _dt
-    while True:
-        if _iteration % LOOP_PRINT_EVERY == 0:
-            print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
-        _iteration += 1
+    try:
+        while True:
+            if _iteration % LOOP_PRINT_EVERY == 0:
+                print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
+            _iteration += 1
 
-        try:
-            # Auto-settle any bets that finished since last loop (updates book balances)
-            for _msg in auto_settle_bets(already_reported=_notified_not_found):
-                print(_msg, flush=True)
-            book_balances = _get_book_balances()
+            try:
+                # Auto-settle any bets that finished since last loop (updates book balances)
+                for _msg in auto_settle_bets(already_reported=_notified_not_found):
+                    print(_msg, flush=True)
+                book_balances = _get_book_balances()
 
-            bankroll = _total_bankroll(book_balances)
+                bankroll = _total_bankroll(book_balances)
 
-            # Run screener silently; only surface output when something changes
-            with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
-                bets = run_screener(
-                    bankroll=bankroll,
-                    min_edge=args.min_edge,
-                    min_diff=args.min_diff,
-                    debug=args.debug,
-                    bookmaker_filter=bookmaker,
-                    book_tradeable=book_balances,
-                )
+                # Run screener silently; only surface output when something changes
+                with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
+                    bets = run_screener(
+                        bankroll=bankroll,
+                        min_edge=args.min_edge,
+                        min_diff=args.min_diff,
+                        debug=args.debug,
+                        bookmaker_filter=bookmaker,
+                        book_tradeable=book_balances,
+                    )
 
-            # Positions already held: (player, market, side) — ignore line/book so the
-            # same underlying bet on any book or line isn't shown again
-            placed_positions: set = set()
-            if TRACKER_PATH.exists():
-                _tr = pd.read_csv(TRACKER_PATH)
-                _pending = _tr[_tr["result"].isna() | (_tr["result"].astype(str).str.strip() == "")]
-                for _, _r in _pending.iterrows():
-                    placed_positions.add((
-                        str(_r["player"]).strip(),
-                        str(_r["market"]).strip(),
-                        str(_r["side"]).strip().upper(),
-                    ))
+                # Positions already held: (player, market, side) — ignore line/book so the
+                # same underlying bet on any book or line isn't shown again
+                placed_positions: set = set()
+                if TRACKER_PATH.exists():
+                    _tr = pd.read_csv(TRACKER_PATH)
+                    _pending = _tr[_tr["result"].isna() | (_tr["result"].astype(str).str.strip() == "")]
+                    for _, _r in _pending.iterrows():
+                        placed_positions.add((
+                            str(_r["player"]).strip(),
+                            str(_r["market"]).strip(),
+                            str(_r["side"]).strip().upper(),
+                        ))
 
-            def _position(r) -> tuple:
-                return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
+                def _position(r) -> tuple:
+                    return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
 
-            # Current bets flagged that aren't already held
-            unplaced_keys = {
-                _bet_key(row) for _, row in bets.iterrows()
-                if _position(row) not in placed_positions
-            } if not bets.empty else set()
+                # Current bets flagged that aren't already held
+                unplaced_keys = {
+                    _bet_key(row) for _, row in bets.iterrows()
+                    if _position(row) not in placed_positions
+                } if not bets.empty else set()
 
-            # Only alert when the set of available opportunities changes
-            new_keys = unplaced_keys - prev_unplaced_keys
-            if new_keys:
-                new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
-                print("\n" + "=" * 90)
-                print(f"NEW BETS  |  {_balance_header(book_balances)}")
-                print("=" * 90)
-                print(format_output(new_bets))
-                print()
-                _notify(new_bets)
-                prompt_and_log_bets(new_bets)
-                book_balances = _get_book_balances()  # refresh after logging
+                # Only alert when the set of available opportunities changes
+                new_keys = unplaced_keys - prev_unplaced_keys
+                if new_keys:
+                    new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
+                    print("\n" + "=" * 90)
+                    print(f"NEW BETS  |  {_balance_header(book_balances)}")
+                    print("=" * 90)
+                    print(format_output(new_bets))
+                    print()
+                    _notify(new_bets)
+                    prompt_and_log_bets(new_bets)
+                    book_balances = _get_book_balances()  # refresh after logging
 
-            prev_unplaced_keys = unplaced_keys
+                prev_unplaced_keys = unplaced_keys
 
-        except Exception as _e:
-            import traceback
-            print(f"[error] {_e}", flush=True)
-            traceback.print_exc()
+            except Exception as _e:
+                import traceback
+                print(f"[error] {_e}", flush=True)
+                traceback.print_exc()
 
-        _time.sleep(args.interval)
+            _time.sleep(args.interval)
+
+    except KeyboardInterrupt:
+        print("\n[screener] Stopped.")
+    except Exception as _fatal:
+        import traceback
+        msg = f"{type(_fatal).__name__}: {_fatal}"
+        print(f"[fatal] {msg}", flush=True)
+        traceback.print_exc()
+        _ntfy("Screener crashed", msg, priority="urgent", tags="rotating_light")
 
