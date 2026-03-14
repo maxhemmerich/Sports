@@ -31,6 +31,7 @@ from model import load_model, predict
 from odds import get_today_lines, american_to_decimal, implied_probability
 
 # ── Config ────────────────────────────────────────────────────────────────────
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")   # set in .env to enable push notifications via ntfy.sh
 BANKROLL = float(os.getenv("BANKROLL", "100"))        # starting bankroll in $
 MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "4"))  # minimum edge % to flag
 MIN_LINE_DIFF = float(os.getenv("MIN_LINE_DIFF", "1.5"))  # minimum |pred - line| pts
@@ -895,6 +896,28 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
     print(f"\n[tracker] {len(logged)} bet(s) logged  |  {summary}")
 
 
+def _notify(new_bets: pd.DataFrame) -> None:
+    """Push a notification via ntfy.sh if NTFY_TOPIC is configured."""
+    if not NTFY_TOPIC:
+        return
+    lines = []
+    for _, row in new_bets.iterrows():
+        mkt = str(row.get("market", "")).replace("player_", "")
+        book = str(row.get("bookmaker", ""))
+        lines.append(f"{row['player']} {row['side']} {row['line']} {mkt} @ {int(row['odds']):+d} ({book}) ${int(row['bet_dollars'])}")
+    body = "\n".join(lines)
+    try:
+        import requests as _req
+        _req.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=body.encode("utf-8"),
+            headers={"Title": f"{len(new_bets)} new bet(s) flagged", "Priority": "high", "Tags": "money_with_wings"},
+            timeout=10,
+        )
+    except Exception as _e:
+        print(f"[notify] Failed: {_e}", flush=True)
+
+
 def format_output(df: pd.DataFrame) -> str:
     """Format bets DataFrame as a readable table."""
     if df.empty:
@@ -1015,6 +1038,7 @@ if __name__ == "__main__":
                 print("=" * 90)
                 print(format_output(new_bets))
                 print()
+                _notify(new_bets)
                 prompt_and_log_bets(new_bets)
                 book_balances = _get_book_balances()  # refresh after logging
 
