@@ -499,39 +499,39 @@ _MARKET_STAT = {
 }
 
 
-def auto_settle_bets() -> None:
+def auto_settle_bets() -> list[str]:
     """
-    Automatically settle unsettled bets whose game date is in the past by
-    fetching actual player stats from the cached NBA game logs.
-    Updates bet_tracker.csv in place and prints a summary.
+    Automatically settle unsettled bets whose game date is in the past.
+    Updates bet_tracker.csv and book balances in state.
+    Returns a list of human-readable result lines (caller decides whether to print).
     """
     if not TRACKER_PATH.exists():
-        return
+        return []
 
     df = pd.read_csv(TRACKER_PATH)
     pending_mask = df["result"].isna() | (df["result"].astype(str).str.strip() == "")
     pending = df[pending_mask].copy()
     if pending.empty:
-        return
+        return []
 
     today = date.today().isoformat()
-    # Only settle bets whose date has passed
     past = pending[pending["date"] < today]
     if past.empty:
-        return
+        return []
 
-    # Load cached game logs (don't force a refresh here)
     try:
+        import contextlib as _cl, io as _io
         from data import load_gamelogs
-        logs = load_gamelogs()
+        _buf = _io.StringIO()
+        with _cl.redirect_stdout(_buf):
+            logs = load_gamelogs()
         logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
         logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
     except Exception as e:
-        print(f"[auto-settle] Could not load game logs: {e}")
-        return
+        return [f"[auto-settle] Could not load game logs: {e}"]
 
-    settled_count = 0
-    not_found = []
+    messages: list[str] = []
+    not_found: list[str] = []
 
     for orig_idx, row in past.iterrows():
         market = str(row.get("market", ""))
@@ -540,12 +540,11 @@ def auto_settle_bets() -> None:
             not_found.append(f"{row['player']} ({market} unknown)")
             continue
 
-        game_date = row["date"]  # "YYYY-MM-DD" string
+        game_date = row["date"]
         player_lower = str(row["player"]).lower().strip()
         line = float(row["line"])
         side = str(row["side"]).upper()
 
-        # Match by player name (case-insensitive) and game date
         try:
             game_date_obj = date.fromisoformat(game_date)
         except ValueError:
@@ -571,27 +570,27 @@ def auto_settle_bets() -> None:
 
         df.at[orig_idx, "result"] = result
 
-        # Update per-book tradeable balance
         book = str(row.get("bookmaker", "")).lower()
         stake = float(row.get("entered_$", 0))
         if result == "WIN":
             dec = american_to_decimal(float(row["odds"]))
-            delta = stake * (dec - 1)  # net profit; stake was already deducted when bet was logged
+            delta = stake * (dec - 1)
         elif result == "PUSH":
-            delta = stake  # return stake
+            delta = stake
         else:
-            delta = 0.0   # LOSS — stake already gone
+            delta = 0.0
         new_tradeable = _update_book_balance(book, delta)
 
         mkt_short = market.replace("player_", "")
-        print(f"  [settled] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}  |  {book} tradeable ${new_tradeable:.0f}")
-        settled_count += 1
+        messages.append(f"  [settled] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}  |  {book} ${new_tradeable:.0f}")
 
-    if settled_count > 0:
+    if messages:
         df.to_csv(TRACKER_PATH, index=False)
 
     if not_found:
-        print(f"[auto-settle] Could not find stats for: {', '.join(not_found)}")
+        messages.append(f"  [not found] {', '.join(not_found)}")
+
+    return messages
 
 
 def prompt_update_results() -> None:
@@ -924,7 +923,8 @@ if __name__ == "__main__":
     bookmaker = DEFAULT_BOOKS  # draftkings + fanduel
 
     # One-time startup: auto-settle any past bets from game logs
-    auto_settle_bets()
+    for _msg in auto_settle_bets():
+        print(_msg)
 
     # Ask for current tradeable balance on each book (syncs with reality)
     book_balances = prompt_book_balances()
@@ -952,12 +952,13 @@ if __name__ == "__main__":
 
     print(f"\n[screener] Running — interval: {args.interval}s  |  Ctrl-C to stop")
 
+    from datetime import datetime as _dt
     while True:
-        from datetime import datetime as _dt
-        print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...")
+        print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
 
         # Auto-settle any bets that finished since last loop (updates book balances)
-        auto_settle_bets()
+        for _msg in auto_settle_bets():
+            print(_msg, flush=True)
         book_balances = _get_book_balances()
 
         bankroll = _total_bankroll(book_balances)
