@@ -956,29 +956,29 @@ if __name__ == "__main__":
     while True:
         print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
 
-        # Auto-settle any bets that finished since last loop (updates book balances)
-        for _msg in auto_settle_bets():
-            print(_msg, flush=True)
-        book_balances = _get_book_balances()
+        try:
+            # Auto-settle any bets that finished since last loop (updates book balances)
+            for _msg in auto_settle_bets():
+                print(_msg, flush=True)
+            book_balances = _get_book_balances()
 
-        bankroll = _total_bankroll(book_balances)
+            bankroll = _total_bankroll(book_balances)
 
-        # Run screener silently; only surface output when something changes
-        with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
-            bets = run_screener(
-                bankroll=bankroll,
-                min_edge=args.min_edge,
-                min_diff=args.min_diff,
-                debug=args.debug,
-                bookmaker_filter=bookmaker,
-                book_tradeable=book_balances,
-            )
+            # Run screener silently; only surface output when something changes
+            with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
+                bets = run_screener(
+                    bankroll=bankroll,
+                    min_edge=args.min_edge,
+                    min_diff=args.min_diff,
+                    debug=args.debug,
+                    bookmaker_filter=bookmaker,
+                    book_tradeable=book_balances,
+                )
 
-        # Positions already held: (player, market, side) — ignore line/book so the
-        # same underlying bet on any book or line isn't shown again
-        placed_positions: set = set()
-        if TRACKER_PATH.exists():
-            try:
+            # Positions already held: (player, market, side) — ignore line/book so the
+            # same underlying bet on any book or line isn't shown again
+            placed_positions: set = set()
+            if TRACKER_PATH.exists():
                 _tr = pd.read_csv(TRACKER_PATH)
                 _pending = _tr[_tr["result"].isna() | (_tr["result"].astype(str).str.strip() == "")]
                 for _, _r in _pending.iterrows():
@@ -987,29 +987,33 @@ if __name__ == "__main__":
                         str(_r["market"]).strip(),
                         str(_r["side"]).strip().upper(),
                     ))
-            except Exception:
-                pass
 
-        def _position(r) -> tuple:
-            return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
+            def _position(r) -> tuple:
+                return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
 
-        if not bets.empty:
-            current_keys = {_bet_key(row) for _, row in bets.iterrows()}
-            new_keys = {
-                _bet_key(row) for _, row in bets.iterrows()
-                if _bet_key(row) not in seen_keys and _position(row) not in placed_positions
-            }
-            if new_keys:
-                new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
-                print("\n" + "=" * 90)
-                print(f"NEW BETS  |  {_balance_header(book_balances)}")
-                print("=" * 90)
-                print(format_output(new_bets))
-                print()
-                prompt_and_log_bets(new_bets)
-                book_balances = _get_book_balances()  # refresh after logging
-            seen_keys = current_keys
-        else:
-            seen_keys = set()
+            if not bets.empty:
+                current_keys = {_bet_key(row) for _, row in bets.iterrows()}
+                new_keys = {
+                    _bet_key(row) for _, row in bets.iterrows()
+                    if _bet_key(row) not in seen_keys and _position(row) not in placed_positions
+                }
+                if new_keys:
+                    new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
+                    print("\n" + "=" * 90)
+                    print(f"NEW BETS  |  {_balance_header(book_balances)}")
+                    print("=" * 90)
+                    print(format_output(new_bets))
+                    print()
+                    prompt_and_log_bets(new_bets)
+                    book_balances = _get_book_balances()  # refresh after logging
+                seen_keys = current_keys
+            else:
+                seen_keys = set()
+
+        except Exception as _e:
+            import traceback
+            print(f"[error] {_e}", flush=True)
+            traceback.print_exc()
 
         _time.sleep(args.interval)
+
