@@ -966,9 +966,20 @@ if __name__ == "__main__":
                 book_tradeable=book_balances,
             )
 
+        # Keys for bets already placed and not yet settled
+        placed_keys: set = set()
+        if TRACKER_PATH.exists():
+            try:
+                _tr = pd.read_csv(TRACKER_PATH)
+                _pending = _tr[_tr["result"].isna() | (_tr["result"].astype(str).str.strip() == "")]
+                for _, _r in _pending.iterrows():
+                    placed_keys.add((_r["player"], _r["market"], _r["side"], float(_r["line"]), str(_r.get("bookmaker", ""))))
+            except Exception:
+                pass
+
         if not bets.empty:
             current_keys = {_bet_key(row) for _, row in bets.iterrows()}
-            new_keys = current_keys - seen_keys
+            new_keys = current_keys - seen_keys - placed_keys
             if new_keys:
                 new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
                 print("\n" + "=" * 90)
