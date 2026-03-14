@@ -246,6 +246,7 @@ def run_screener(
     debug: bool = False,
     bookmaker_filter: list[str] | str | None = None,
     lines_df: "pd.DataFrame | None" = None,
+    book_tradeable: "dict[str, float] | None" = None,
 ) -> pd.DataFrame:
     """
     Main screener pipeline.
@@ -299,6 +300,12 @@ def run_screener(
     # Filter to specific bookmaker(s) if requested
     if bookmaker_filter and "bookmaker" in lines_df.columns:
         lower_filter = [b.lower() for b in bookmaker_filter]
+        # Drop books with zero tradeable balance
+        if book_tradeable:
+            lower_filter = [b for b in lower_filter if book_tradeable.get(b, 0.0) > 0]
+            if not lower_filter:
+                print("[screener] All books have $0 tradeable balance — no bets to flag.")
+                return pd.DataFrame()
         mask = lines_df["bookmaker"].str.lower().isin(lower_filter)
         lines_df = lines_df[mask]
         if lines_df.empty:
@@ -564,7 +571,8 @@ def auto_settle_bets() -> None:
 
         df.at[orig_idx, "result"] = result
 
-        # Update running bankroll
+        # Update per-book tradeable balance
+        book = str(row.get("bookmaker", "")).lower()
         stake = float(row.get("entered_$", 0))
         if result == "WIN":
             dec = american_to_decimal(float(row["odds"]))
@@ -573,11 +581,10 @@ def auto_settle_bets() -> None:
             delta = stake  # return stake
         else:
             delta = 0.0   # LOSS — stake already gone
-        _update_bankroll(delta)
+        new_tradeable = _update_book_balance(book, delta)
 
         mkt_short = market.replace("player_", "")
-        bankroll_now = _get_bankroll()
-        print(f"  [settled] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}  |  bankroll ${bankroll_now:.0f}")
+        print(f"  [settled] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}  |  {book} tradeable ${new_tradeable:.0f}")
         settled_count += 1
 
     if settled_count > 0:
@@ -636,7 +643,7 @@ def prompt_update_results() -> None:
         result = result_map.get(raw_result)
         if result:
             df.at[orig_idx, "result"] = result
-            # Update bankroll
+            book = str(row.get("bookmaker", "")).lower()
             stake = float(row.get("entered_$", 0))
             if result == "WIN":
                 dec = american_to_decimal(float(row["odds"]))
@@ -645,8 +652,8 @@ def prompt_update_results() -> None:
                 delta = stake
             else:
                 delta = 0.0
-            new_br = _update_bankroll(delta)
-            print(f"    → {result}  |  bankroll ${new_br:.0f}")
+            new_tradeable = _update_book_balance(book, delta)
+            print(f"    → {result}  |  {book} tradeable ${new_tradeable:.0f}")
         else:
             print(f"    Unrecognized '{raw_result}' — skipping.")
 
@@ -671,21 +678,76 @@ def _save_state(data: dict) -> None:
     STATE_PATH.write_text(_json.dumps(existing, indent=2))
 
 
-def _get_bankroll() -> float:
-    """Return current bankroll from state, initialising from BANKROLL env on first run."""
-    state = _load_state()
-    if "bankroll" not in state:
-        _save_state({"bankroll": BANKROLL})
-        return BANKROLL
-    return float(state["bankroll"])
+def _get_book_balances() -> dict[str, float]:
+    """Return tradeable balance per book from state (excludes at-risk pending bets)."""
+    return _load_state().get("book_balances", {})
 
 
-def _update_bankroll(delta: float) -> float:
-    """Add delta to stored bankroll and return the new value."""
-    current = _get_bankroll()
-    new = current + delta
-    _save_state({"bankroll": new})
-    return new
+def _update_book_balance(book: str, delta: float) -> float:
+    """Add delta to a book's tradeable balance. Returns the new tradeable value."""
+    balances = _get_book_balances()
+    balances[book] = balances.get(book, 0.0) + delta
+    _save_state({"book_balances": balances})
+    return balances[book]
+
+
+def _at_risk_per_book() -> dict[str, float]:
+    """Sum of entered_$ for unsettled bets, keyed by bookmaker."""
+    if not TRACKER_PATH.exists():
+        return {}
+    try:
+        df = pd.read_csv(TRACKER_PATH)
+        pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
+        if pending.empty or "entered_$" not in pending.columns:
+            return {}
+        return pending.groupby("bookmaker")["entered_$"].sum().to_dict()
+    except Exception:
+        return {}
+
+
+def _total_bankroll(book_balances: dict[str, float]) -> float:
+    """Total capital = tradeable across all books + at-risk pending bets."""
+    at_risk = _at_risk_per_book()
+    total = sum(book_balances.values())
+    total += sum(at_risk.get(b, 0.0) for b in book_balances)
+    return total
+
+
+def prompt_book_balances() -> dict[str, float]:
+    """
+    Ask the user for their current tradeable balance on each default book.
+    Tradeable = money available to bet right now (not including pending bets).
+    Saves to state and returns the dict.
+    """
+    saved = _get_book_balances()
+    balances: dict[str, float] = {}
+    print(f"\n{'=' * 60}")
+    print("Enter tradeable balance for each sportsbook (money available to bet now):")
+    for book in DEFAULT_BOOKS:
+        default = saved.get(book, 0.0)
+        try:
+            raw = input(f"  {book.title()} [${default:.0f}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            raw = ""
+        if raw:
+            try:
+                balances[book] = float(raw.replace("$", "").replace(",", ""))
+            except ValueError:
+                print(f"    Invalid — using ${default:.0f}")
+                balances[book] = default
+        else:
+            balances[book] = default
+    _save_state({"book_balances": balances})
+
+    at_risk = _at_risk_per_book()
+    print()
+    for book in DEFAULT_BOOKS:
+        risk = at_risk.get(book, 0.0)
+        total = balances[book] + risk
+        print(f"  {book.title()}: ${balances[book]:.0f} tradeable + ${risk:.0f} at risk = ${total:.0f}")
+    total_br = _total_bankroll(balances)
+    print(f"  Total bankroll: ${total_br:.0f}")
+    return balances
 
 
 def prompt_bookmaker(lines_df: pd.DataFrame) -> list[str] | None:
@@ -818,9 +880,15 @@ def prompt_and_log_bets(bets_df: pd.DataFrame) -> None:
     else:
         combined = new_df
     combined.to_csv(TRACKER_PATH, index=False)
-    total_staked = sum(b["entered_$"] for b in logged)
-    new_br = _update_bankroll(-total_staked)
-    print(f"\n[tracker] {len(logged)} bet(s) logged — staked ${total_staked:.0f}  |  bankroll ${new_br:.0f}")
+    for b in logged:
+        _update_book_balance(b["bookmaker"].lower(), -b["entered_$"])
+    balances = _get_book_balances()
+    at_risk = _at_risk_per_book()
+    summary = "  ".join(
+        f"{book.title()} ${balances.get(book, 0):.0f} avail"
+        for book in DEFAULT_BOOKS
+    )
+    print(f"\n[tracker] {len(logged)} bet(s) logged  |  {summary}")
 
 
 def format_output(df: pd.DataFrame) -> str:
@@ -855,22 +923,35 @@ if __name__ == "__main__":
 
     bookmaker = DEFAULT_BOOKS  # draftkings + fanduel
 
-    # One-time startup: settle any remaining manual bets that auto-settle missed
+    # One-time startup: settle any bets that can be auto-settled, then manual fallback
     auto_settle_bets()
     prompt_update_results()
+
+    # Ask for current tradeable balance on each book (syncs with reality)
+    book_balances = prompt_book_balances()
 
     def _bet_key(r: pd.Series) -> tuple:
         return (r["player"], r["market"], r["side"], float(r["line"]), r.get("bookmaker", ""))
 
+    def _balance_header(book_balances: dict) -> str:
+        at_risk = _at_risk_per_book()
+        parts = []
+        for book in DEFAULT_BOOKS:
+            avail = book_balances.get(book, 0.0)
+            risk = at_risk.get(book, 0.0)
+            parts.append(f"{book.title()} ${avail:.0f} avail / ${avail + risk:.0f} total")
+        return "  |  ".join(parts)
+
     seen_keys: set = set()
 
-    print(f"[screener] Running — books: {', '.join(bookmaker)}  |  interval: {args.interval}s  |  Ctrl-C to stop")
+    print(f"\n[screener] Running — interval: {args.interval}s  |  Ctrl-C to stop")
 
     while True:
-        # Auto-settle any bets that finished since last loop
+        # Auto-settle any bets that finished since last loop (updates book balances)
         auto_settle_bets()
+        book_balances = _get_book_balances()
 
-        bankroll = _get_bankroll()
+        bankroll = _total_bankroll(book_balances)
 
         # Run screener silently; only surface output when something changes
         with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
@@ -880,6 +961,7 @@ if __name__ == "__main__":
                 min_diff=args.min_diff,
                 debug=args.debug,
                 bookmaker_filter=bookmaker,
+                book_tradeable=book_balances,
             )
 
         if not bets.empty:
@@ -888,11 +970,12 @@ if __name__ == "__main__":
             if new_keys:
                 new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
                 print("\n" + "=" * 90)
-                print(f"NEW BETS  |  bankroll ${bankroll:.0f}")
+                print(f"NEW BETS  |  {_balance_header(book_balances)}")
                 print("=" * 90)
                 print(format_output(new_bets))
                 print()
                 prompt_and_log_bets(new_bets)
+                book_balances = _get_book_balances()  # refresh after logging
             seen_keys = current_keys
         else:
             seen_keys = set()
