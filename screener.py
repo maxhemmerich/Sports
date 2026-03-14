@@ -718,6 +718,46 @@ def _total_bankroll(book_balances: dict[str, float]) -> float:
     return total
 
 
+def _calc_pnl(since_date: str | None = None) -> float:
+    """
+    Calculate realised PnL from settled bets in the tracker.
+    Pass since_date (ISO string, e.g. '2026-03-14') to restrict to that day.
+    Returns net profit/loss in dollars.
+    """
+    if not TRACKER_PATH.exists():
+        return 0.0
+    try:
+        df = pd.read_csv(TRACKER_PATH)
+        settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])]
+        if since_date:
+            settled = settled[settled["date"].astype(str).str.strip() == since_date]
+        if settled.empty:
+            return 0.0
+        pnl = 0.0
+        for _, row in settled.iterrows():
+            result = str(row["result"]).strip().upper()
+            amt = float(row.get("entered_$", 0) or 0)
+            odds = float(row.get("odds", 0) or 0)
+            if result == "WIN":
+                pnl += amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
+            elif result == "LOSS":
+                pnl -= amt
+            # PUSH: no change
+        return pnl
+    except Exception:
+        return 0.0
+
+
+def _pnl_str() -> str:
+    """Return a compact 'Today $X.XX  |  Overall $X.XX' PnL string."""
+    today = date.today().isoformat()
+    daily = _calc_pnl(since_date=today)
+    overall = _calc_pnl()
+    d_sign = "+" if daily >= 0 else ""
+    o_sign = "+" if overall >= 0 else ""
+    return f"Today {d_sign}${daily:.0f}  |  Overall {o_sign}${overall:.0f}"
+
+
 def prompt_book_balances() -> dict[str, float]:
     """
     Ask the user for their current tradeable balance on each default book.
@@ -976,6 +1016,7 @@ if __name__ == "__main__":
             avail = book_balances.get(book, 0.0)
             risk = at_risk.get(book, 0.0)
             parts.append(f"{book.title()} ${avail:.0f} avail / ${avail + risk:.0f} total")
+        parts.append(_pnl_str())
         return "  |  ".join(parts)
 
     import threading as _threading
@@ -1009,8 +1050,11 @@ if __name__ == "__main__":
                 _st["iteration"] += 1
 
                 try:
-                    for _msg in auto_settle_bets(already_reported=_st["notified_not_found"]):
+                    _settled_msgs = list(auto_settle_bets(already_reported=_st["notified_not_found"]))
+                    for _msg in _settled_msgs:
                         print(_msg, flush=True)
+                    if _settled_msgs:
+                        print(f"  [pnl] {_pnl_str()}", flush=True)
                     _st["book_balances"] = _get_book_balances()
 
                     bankroll = _total_bankroll(_st["book_balances"])
