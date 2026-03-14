@@ -929,8 +929,15 @@ if __name__ == "__main__":
     # Ask for current tradeable balance on each book (syncs with reality)
     book_balances = prompt_book_balances()
 
-    def _bet_key(r: pd.Series) -> tuple:
-        return (r["player"], r["market"], r["side"], float(r["line"]), r.get("bookmaker", ""))
+    def _bet_key(r) -> tuple:
+        """Normalised key so screener rows and tracker CSV rows compare equal."""
+        return (
+            str(r["player"]).strip(),
+            str(r["market"]).strip(),
+            str(r["side"]).strip().upper(),
+            float(r["line"]),
+            str(r["bookmaker"]).strip().lower() if "bookmaker" in r and r["bookmaker"] == r["bookmaker"] else "",
+        )
 
     def _balance_header(book_balances: dict) -> str:
         at_risk = _at_risk_per_book()
@@ -973,7 +980,7 @@ if __name__ == "__main__":
                 _tr = pd.read_csv(TRACKER_PATH)
                 _pending = _tr[_tr["result"].isna() | (_tr["result"].astype(str).str.strip() == "")]
                 for _, _r in _pending.iterrows():
-                    placed_keys.add((_r["player"], _r["market"], _r["side"], float(_r["line"]), str(_r.get("bookmaker", ""))))
+                    placed_keys.add(_bet_key(_r))
             except Exception:
                 pass
 
