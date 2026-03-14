@@ -974,20 +974,31 @@ if __name__ == "__main__":
                 book_tradeable=book_balances,
             )
 
-        # Keys for bets already placed and not yet settled
-        placed_keys: set = set()
+        # Positions already held: (player, market, side) — ignore line/book so the
+        # same underlying bet on any book or line isn't shown again
+        placed_positions: set = set()
         if TRACKER_PATH.exists():
             try:
                 _tr = pd.read_csv(TRACKER_PATH)
                 _pending = _tr[_tr["result"].isna() | (_tr["result"].astype(str).str.strip() == "")]
                 for _, _r in _pending.iterrows():
-                    placed_keys.add(_bet_key(_r))
+                    placed_positions.add((
+                        str(_r["player"]).strip(),
+                        str(_r["market"]).strip(),
+                        str(_r["side"]).strip().upper(),
+                    ))
             except Exception:
                 pass
 
+        def _position(r) -> tuple:
+            return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
+
         if not bets.empty:
             current_keys = {_bet_key(row) for _, row in bets.iterrows()}
-            new_keys = current_keys - seen_keys - placed_keys
+            new_keys = {
+                _bet_key(row) for _, row in bets.iterrows()
+                if _bet_key(row) not in seen_keys and _position(row) not in placed_positions
+            }
             if new_keys:
                 new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
                 print("\n" + "=" * 90)
