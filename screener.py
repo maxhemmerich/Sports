@@ -43,7 +43,8 @@ RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
 DEFAULT_BOOKS = ["draftkings", "fanduel"]
-LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "1800"))  # seconds between screener runs (default 30 min)
+LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))    # seconds between screener runs
+LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))  # print timestamp every N iterations
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
 SIGMA_BY_MARKET = {
@@ -949,12 +950,15 @@ if __name__ == "__main__":
         return "  |  ".join(parts)
 
     seen_keys: set = set()
+    _iteration = 0
 
-    print(f"\n[screener] Running — interval: {args.interval}s  |  Ctrl-C to stop")
+    print(f"\n[screener] Running — check every {args.interval}s, print every {LOOP_PRINT_EVERY} iterations  |  Ctrl-C to stop")
 
     from datetime import datetime as _dt
     while True:
-        print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
+        if _iteration % LOOP_PRINT_EVERY == 0:
+            print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
+        _iteration += 1
 
         try:
             # Auto-settle any bets that finished since last loop (updates book balances)
