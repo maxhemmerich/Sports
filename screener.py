@@ -500,7 +500,7 @@ _MARKET_STAT = {
 }
 
 
-def auto_settle_bets() -> list[str]:
+def auto_settle_bets(already_reported: set | None = None) -> list[str]:
     """
     Automatically settle unsettled bets whose game date is in the past.
     Updates bet_tracker.csv and book balances in state.
@@ -558,7 +558,11 @@ def auto_settle_bets() -> list[str]:
         ]
 
         if match.empty:
-            not_found.append(f"{row['player']} ({game_date})")
+            key = f"{row['player']} ({game_date})"
+            if already_reported is None or key not in already_reported:
+                not_found.append(key)
+                if already_reported is not None:
+                    already_reported.add(key)
             continue
 
         actual = float(match.iloc[0][stat_col])
@@ -950,6 +954,7 @@ if __name__ == "__main__":
         return "  |  ".join(parts)
 
     seen_keys: set = set()
+    _notified_not_found: set = set()
     _iteration = 0
 
     print(f"\n[screener] Running — check every {args.interval}s, print every {LOOP_PRINT_EVERY} iterations  |  Ctrl-C to stop")
@@ -962,7 +967,7 @@ if __name__ == "__main__":
 
         try:
             # Auto-settle any bets that finished since last loop (updates book balances)
-            for _msg in auto_settle_bets():
+            for _msg in auto_settle_bets(already_reported=_notified_not_found):
                 print(_msg, flush=True)
             book_balances = _get_book_balances()
 
