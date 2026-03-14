@@ -478,6 +478,100 @@ def run_screener(
 
 TRACKER_PATH = RESULTS_DIR / "bet_tracker.csv"
 
+# market key → gamelog stat column
+_MARKET_STAT = {
+    "player_points":    "pts",
+    "player_rebounds":  "reb",
+    "player_assists":   "ast",
+    "player_threes":    "fg3m",
+    "player_blocks":    "blk",
+    "player_steals":    "stl",
+    "player_turnovers": "tov",
+}
+
+
+def auto_settle_bets() -> None:
+    """
+    Automatically settle unsettled bets whose game date is in the past by
+    fetching actual player stats from the cached NBA game logs.
+    Updates bet_tracker.csv in place and prints a summary.
+    """
+    if not TRACKER_PATH.exists():
+        return
+
+    df = pd.read_csv(TRACKER_PATH)
+    pending_mask = df["result"].isna() | (df["result"].astype(str).str.strip() == "")
+    pending = df[pending_mask].copy()
+    if pending.empty:
+        return
+
+    today = date.today().isoformat()
+    # Only settle bets whose date has passed
+    past = pending[pending["date"] < today]
+    if past.empty:
+        return
+
+    # Load cached game logs (don't force a refresh here)
+    try:
+        from data import load_gamelogs
+        logs = load_gamelogs()
+        logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
+        logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
+    except Exception as e:
+        print(f"[auto-settle] Could not load game logs: {e}")
+        return
+
+    settled_count = 0
+    not_found = []
+
+    for orig_idx, row in past.iterrows():
+        market = str(row.get("market", ""))
+        stat_col = _MARKET_STAT.get(market)
+        if stat_col is None:
+            not_found.append(f"{row['player']} ({market} unknown)")
+            continue
+
+        game_date = row["date"]  # "YYYY-MM-DD" string
+        player_lower = str(row["player"]).lower().strip()
+        line = float(row["line"])
+        side = str(row["side"]).upper()
+
+        # Match by player name (case-insensitive) and game date
+        try:
+            game_date_obj = date.fromisoformat(game_date)
+        except ValueError:
+            not_found.append(f"{row['player']} (bad date {game_date})")
+            continue
+
+        match = logs[
+            (logs["player_name_lower"] == player_lower) &
+            (logs["game_date"] == game_date_obj)
+        ]
+
+        if match.empty:
+            not_found.append(f"{row['player']} ({game_date})")
+            continue
+
+        actual = float(match.iloc[0][stat_col])
+        if actual > line:
+            result = "WIN" if side == "OVER" else "LOSS"
+        elif actual < line:
+            result = "LOSS" if side == "OVER" else "WIN"
+        else:
+            result = "PUSH"
+
+        df.at[orig_idx, "result"] = result
+        mkt_short = market.replace("player_", "")
+        print(f"  [auto] {row['player']} | {mkt_short} | {side} {line} → actual {actual} → {result}")
+        settled_count += 1
+
+    if settled_count > 0:
+        df.to_csv(TRACKER_PATH, index=False)
+        print(f"[auto-settle] {settled_count} bet(s) settled automatically → {TRACKER_PATH}")
+
+    if not_found:
+        print(f"[auto-settle] Could not find stats for: {', '.join(not_found)}")
+
 
 def prompt_update_results() -> None:
     """
@@ -782,7 +876,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Settle unsettled bets from previous sessions first
-    prompt_update_results()
+    auto_settle_bets()       # auto-settle past bets from game logs
+    prompt_update_results()  # manual fallback for anything not found
 
     # Bankroll: CLI --bankroll overrides prompt (useful for scripts/cron)
     if args.bankroll != BANKROLL:
