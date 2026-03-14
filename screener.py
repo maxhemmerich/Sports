@@ -1043,7 +1043,6 @@ if __name__ == "__main__":
                     print(format_output(new_bets))
                     print()
                     _notify(new_bets)
-                    prompt_and_log_bets(new_bets)
                     book_balances = _get_book_balances()  # refresh after logging
 
                 prev_unplaced_keys = unplaced_keys
