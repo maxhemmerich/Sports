@@ -1045,8 +1045,6 @@ if __name__ == "__main__":
     def _screener_loop():
         try:
             while not _stop.is_set():
-                if _st["iteration"] % LOOP_PRINT_EVERY == 0:
-                    print(f"[{_dt.now().strftime('%H:%M:%S')}] Checking props ...", flush=True)
                 _st["iteration"] += 1
 
                 try:
@@ -1057,9 +1055,11 @@ if __name__ == "__main__":
                         print(f"  [pnl] {_pnl_str()}", flush=True)
                     _st["book_balances"] = _get_book_balances()
 
-                    bankroll = _total_bankroll(_st["book_balances"])
+                    bankroll = _total_bankroll(_st["book_balances"]) or BANKROLL
 
-                    with open(os.devnull, "w") as _null, contextlib.redirect_stdout(_null):
+                    import io as _io
+                    _buf = _io.StringIO()
+                    with contextlib.redirect_stdout(_buf):
                         bets = run_screener(
                             bankroll=bankroll,
                             min_edge=args.min_edge,
@@ -1068,6 +1068,20 @@ if __name__ == "__main__":
                             bookmaker_filter=bookmaker,
                             book_tradeable=_st["book_balances"],
                         )
+                    # Print the screener summary line (last line of captured output)
+                    _screener_out = _buf.getvalue().strip()
+                    if _screener_out:
+                        _summary = next(
+                            (l for l in reversed(_screener_out.splitlines()) if "Lines evaluated" in l or "No +EV" in l or "No lines" in l or "bankroll" in l.lower()),
+                            None,
+                        )
+                        ts = _dt.now().strftime('%H:%M:%S')
+                        if _summary:
+                            print(f"[{ts}] {_summary.strip()}", flush=True)
+                        elif _st["iteration"] % LOOP_PRINT_EVERY == 1:
+                            print(f"[{ts}] Checking props ... bankroll=${bankroll:.0f}", flush=True)
+                    if args.debug:
+                        print(_screener_out, flush=True)
 
                     placed_positions: set = set()
                     if TRACKER_PATH.exists():
