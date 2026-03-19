@@ -37,6 +37,7 @@ MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "4"))  # minimum edge % to flag
 MIN_LINE_DIFF = float(os.getenv("MIN_LINE_DIFF", "1.5"))  # minimum |pred - line| pts
 MAX_KELLY_FRACTION = float(os.getenv("MAX_KELLY_FRACTION", "0.05"))  # cap at 5% per bet
 MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "1.0"))  # max total bankroll % across all bets
+MAX_BETS = int(os.getenv("MAX_BETS", "20"))            # max bets to show/recommend (top N by edge)
 MIN_GAMES = int(os.getenv("MIN_GAMES", "20"))           # min career games in DB before flagging
 MIN_SEASON_GAMES = int(os.getenv("MIN_SEASON_GAMES", "15"))  # min games in current season (Oct–present)
 CURRENT_SEASON_START = "2025-10-01"
@@ -480,6 +481,10 @@ def run_screener(
     # Drop bets that round to $0 — not actionable
     bets_df = bets_df[bets_df["bet_dollars"] >= 1].reset_index(drop=True)
 
+    # Cap to top N bets by edge
+    if MAX_BETS > 0:
+        bets_df = bets_df.head(MAX_BETS).reset_index(drop=True)
+
     # Save results
     today = date.today().isoformat()
     out_path = RESULTS_DIR / f"bets_{today}.csv"
@@ -861,19 +866,17 @@ def _log_slip(bets_df: pd.DataFrame, raw: str) -> None:
     import re as _re
     tokens = _re.sub(r"[$,]", " ", raw).split()
     slip: dict[int, float] = {}
-    i = 0
-    while i < len(tokens):
-        if tokens[i].isdigit():
-            row_num = int(tokens[i])
-            if i + 1 < len(tokens):
-                try:
-                    amt = float(tokens[i + 1])
-                    slip[row_num] = amt
-                    i += 2
-                    continue
-                except ValueError:
-                    pass
-        i += 1
+    pending_rows: list[int] = []  # numbers seen before an amount
+    for tok in tokens:
+        try:
+            amt = float(tok)
+            # Apply this amount to all pending row numbers
+            for row_num in pending_rows:
+                slip[row_num] = amt
+            pending_rows = []
+        except ValueError:
+            if tok.isdigit():
+                pending_rows.append(int(tok))
 
     if not slip:
         print("[tracker] Could not parse slip — skipping.", flush=True)
