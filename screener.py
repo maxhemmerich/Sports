@@ -1070,13 +1070,22 @@ if __name__ == "__main__":
                         )
                     # Print the screener summary line (last line of captured output)
                     _screener_out = _buf.getvalue().strip()
+                    ts = _dt.now().strftime('%H:%M:%S')
                     if _screener_out:
+                        _lines = _screener_out.splitlines()
                         _summary = next(
-                            (l for l in reversed(_screener_out.splitlines()) if "Lines evaluated" in l or "No +EV" in l or "No lines" in l or "bankroll" in l.lower()),
+                            (l for l in reversed(_lines) if "Lines evaluated" in l or "No +EV" in l or "No lines" in l or "bankroll" in l.lower()),
                             None,
                         )
-                        ts = _dt.now().strftime('%H:%M:%S')
-                        if _summary:
+                        if bets.empty and "No lines" in _screener_out:
+                            # Something wrong upstream — print full API diagnostics once per LOOP_PRINT_EVERY
+                            if _st["iteration"] % LOOP_PRINT_EVERY == 1:
+                                print(f"[{ts}] === screener diagnostics ===", flush=True)
+                                for _l in _lines:
+                                    print(f"  {_l}", flush=True)
+                            else:
+                                print(f"[{ts}] {_summary.strip() if _summary else 'No lines (see diagnostics above)'}", flush=True)
+                        elif _summary:
                             print(f"[{ts}] {_summary.strip()}", flush=True)
                         elif _st["iteration"] % LOOP_PRINT_EVERY == 1:
                             print(f"[{ts}] Checking props ... bankroll=${bankroll:.0f}", flush=True)
