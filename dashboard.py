@@ -1,0 +1,607 @@
+"""
+NBA Props — Web Dashboard
+Flask server that shares in-process state with the screener loop.
+
+Usage (automatic):  started by screener.py --loop
+External access:    ngrok http 5050
+                    cloudflared tunnel --url http://localhost:5050
+"""
+from __future__ import annotations
+
+import json
+import queue
+import threading
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+try:
+    from flask import Flask, Response, jsonify, request, stream_with_context
+except ImportError:
+    raise SystemExit("pip install flask  (or: pip install -r requirements.txt)")
+
+# ── Shared state (set by start_dashboard) ─────────────────────────────────────
+_st: dict = {}
+_lock: threading.Lock = threading.Lock()
+_clients: list[queue.Queue] = []
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "nba-props-dash"
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _american_to_decimal(odds: float) -> float:
+    if odds > 0:
+        return 1 + odds / 100
+    return 1 + 100 / abs(odds)
+
+
+def _build_state() -> dict:
+    from screener import (  # lazy — avoids circular import at module load
+        TRACKER_PATH, DEFAULT_BOOKS,
+        _calc_pnl, _at_risk_per_book,
+        _bet_key, _position,
+    )
+
+    with _lock:
+        bets = _st.get("latest_bets", pd.DataFrame()).copy()
+        balances = dict(_st.get("book_balances", {}))
+        skipped = set(_st.get("skipped_keys", set()))
+        placed = set(_st.get("placed_positions", set()))
+        active_books = list(_st.get("active_books", DEFAULT_BOOKS))
+        cfg = {
+            "min_edge": _st.get("min_edge", 4.0),
+            "min_diff": _st.get("min_diff", 1.5),
+            "interval": _st.get("interval", 60),
+        }
+
+    # ── Book totals (avail + at-risk) ─────────────────────────────────────────
+    at_risk = _at_risk_per_book()
+    book_info: dict[str, dict] = {}
+    all_books = sorted(set(list(balances.keys()) + list(at_risk.keys()) + active_books))
+    for book in all_books:
+        avail = balances.get(book, 0.0)
+        risk = at_risk.get(book, 0.0)
+        book_info[book] = {
+            "avail": round(avail, 2),
+            "at_risk": round(risk, 2),
+            "total": round(avail + risk, 2),
+            "active": book in active_books,
+        }
+    total_balance = sum(b["avail"] for b in book_info.values())
+
+    # ── Open bets ─────────────────────────────────────────────────────────────
+    open_bets: list[dict] = []
+    wagered = to_gain = to_lose = 0.0
+    if TRACKER_PATH.exists():
+        try:
+            tr = pd.read_csv(TRACKER_PATH)
+            pending = tr[tr["result"].isna() | (tr["result"].astype(str).str.strip() == "")]
+            for orig_idx, row in pending.iterrows():
+                stake = float(row.get("entered_$", 0) or 0)
+                odds = float(row.get("odds", -110) or -110)
+                dec = _american_to_decimal(odds)
+                profit = round(stake * (dec - 1), 2)
+                wagered += stake
+                to_gain += profit
+                to_lose += stake
+                mkt = str(row.get("market", "")).replace("player_", "")
+                open_bets.append({
+                    "tracker_idx": int(orig_idx),
+                    "date": str(row.get("date", "")),
+                    "player": str(row.get("player", "")),
+                    "market": mkt,
+                    "line": float(row.get("line", 0)),
+                    "side": str(row.get("side", "")),
+                    "odds": int(odds),
+                    "bookmaker": str(row.get("bookmaker", "")),
+                    "entered": round(stake, 2),
+                    "to_win": profit,
+                })
+        except Exception:
+            pass
+
+    # ── Potential bets ────────────────────────────────────────────────────────
+    potential: list[dict] = []
+    if not bets.empty:
+        for _, row in bets.iterrows():
+            key = _bet_key(row)
+            mkt = str(row.get("market", "")).replace("player_", "")
+            potential.append({
+                "key": list(key),
+                "player": str(row["player"]),
+                "market": mkt,
+                "line": float(row["line"]),
+                "side": str(row["side"]),
+                "odds": int(row["odds"]),
+                "bookmaker": str(row.get("bookmaker", "")),
+                "suggested": int(row["bet_dollars"]),
+                "edge_pct": round(float(row.get("edge_pct", 0)), 1),
+                "prediction": round(float(row.get("prediction", 0)), 1),
+                "game": str(row.get("game", "")),
+                "skipped": key in skipped,
+            })
+
+    # ── PnL ───────────────────────────────────────────────────────────────────
+    today_pnl = _calc_pnl(since_date=date.today().isoformat())
+    overall_pnl = _calc_pnl()
+
+    return {
+        "book_info": book_info,
+        "total_balance": round(total_balance, 2),
+        "wagered": round(wagered, 2),
+        "to_gain": round(to_gain, 2),
+        "to_lose": round(to_lose, 2),
+        "today_pnl": round(today_pnl, 2),
+        "overall_pnl": round(overall_pnl, 2),
+        "potential_bets": potential,
+        "open_bets": open_bets,
+        "active_books": active_books,
+        "config": cfg,
+    }
+
+
+# ── SSE broadcast ─────────────────────────────────────────────────────────────
+
+def broadcast_state() -> None:
+    """Push current state to all connected SSE clients."""
+    try:
+        data = _build_state()
+    except Exception:
+        return
+    dead = []
+    for q in _clients:
+        try:
+            q.put_nowait(data)
+        except queue.Full:
+            dead.append(q)
+    for q in dead:
+        try:
+            _clients.remove(q)
+        except ValueError:
+            pass
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route("/")
+def index():
+    return _HTML
+
+
+@app.route("/api/state")
+def api_state():
+    return jsonify(_build_state())
+
+
+@app.route("/events")
+def sse():
+    q: queue.Queue = queue.Queue(maxsize=5)
+    _clients.append(q)
+
+    def generate():
+        # initial snapshot
+        try:
+            yield f"data: {json.dumps(_build_state())}\n\n"
+        except Exception:
+            pass
+        while True:
+            try:
+                data = q.get(timeout=30)
+                yield f"data: {json.dumps(data)}\n\n"
+            except queue.Empty:
+                yield 'data: {"ping":1}\n\n'
+            except GeneratorExit:
+                break
+
+    resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
+
+
+@app.route("/api/place", methods=["POST"])
+def api_place():
+    from screener import _bet_key, _log_slip, _get_book_balances
+
+    body = request.json or {}
+    key_raw = body.get("key")
+    amount = float(body.get("amount", 0))
+    if not key_raw or not amount:
+        return jsonify({"error": "key and amount required"}), 400
+
+    key = tuple(key_raw[:4]) + (str(key_raw[4]).lower(),) if len(key_raw) >= 5 else tuple(key_raw)
+
+    with _lock:
+        bets = _st.get("latest_bets", pd.DataFrame()).copy()
+
+    mask = [_bet_key(r) == key for _, r in bets.iterrows()]
+    row_df = bets[mask].reset_index(drop=True)
+    if row_df.empty:
+        return jsonify({"error": "bet not found in current list"}), 404
+
+    _log_slip(row_df, f"1 ${amount:.0f}")
+
+    with _lock:
+        _st["book_balances"] = _get_book_balances()
+
+    broadcast_state()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/skip", methods=["POST"])
+def api_skip():
+    body = request.json or {}
+    key_raw = body.get("key")
+    if not key_raw:
+        return jsonify({"error": "key required"}), 400
+    key = tuple(key_raw[:4]) + (str(key_raw[4]).lower(),) if len(key_raw) >= 5 else tuple(key_raw)
+    with _lock:
+        _st.setdefault("skipped_keys", set()).add(key)
+    broadcast_state()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/settle", methods=["POST"])
+def api_settle():
+    from screener import TRACKER_PATH, _update_book_balance, _get_book_balances
+
+    body = request.json or {}
+    tracker_idx = body.get("tracker_idx")
+    result = str(body.get("result", "")).strip().upper()
+    if result not in ("WIN", "LOSS", "PUSH"):
+        return jsonify({"error": "result must be WIN, LOSS, or PUSH"}), 400
+    if tracker_idx is None:
+        return jsonify({"error": "tracker_idx required"}), 400
+
+    if not TRACKER_PATH.exists():
+        return jsonify({"error": "tracker not found"}), 404
+
+    df = pd.read_csv(TRACKER_PATH)
+    idx = int(tracker_idx)
+    if idx not in df.index:
+        return jsonify({"error": f"row {idx} not found"}), 404
+
+    row = df.loc[idx]
+    stake = float(row.get("entered_$", 0) or 0)
+    odds = float(row.get("odds", -110) or -110)
+    book = str(row.get("bookmaker", "")).lower()
+
+    df.at[idx, "result"] = result
+    df.to_csv(TRACKER_PATH, index=False)
+
+    dec = _american_to_decimal(odds)
+    if result == "WIN":
+        delta = stake * (dec - 1)
+    elif result == "PUSH":
+        delta = stake  # return stake
+    else:
+        delta = 0.0
+
+    _update_book_balance(book, delta)
+
+    with _lock:
+        _st["book_balances"] = _get_book_balances()
+
+    broadcast_state()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/config", methods=["POST"])
+def api_config():
+    body = request.json or {}
+    with _lock:
+        if "min_edge" in body:
+            _st["min_edge"] = float(body["min_edge"])
+        if "min_diff" in body:
+            _st["min_diff"] = float(body["min_diff"])
+        if "interval" in body:
+            _st["interval"] = int(body["interval"])
+        if "books" in body:
+            _st["active_books"] = [str(b).lower() for b in body["books"]]
+        if body.get("refresh_lines"):
+            _st["lines_fetched_at"] = 0.0
+    broadcast_state()
+    return jsonify({"ok": True})
+
+
+# ── Start ─────────────────────────────────────────────────────────────────────
+
+def start_dashboard(shared_st: dict, shared_lock: threading.Lock, port: int = 5050) -> None:
+    """Start Flask dashboard in a daemon thread, sharing screener _st."""
+    global _st, _lock
+    _st = shared_st
+    _lock = shared_lock
+
+    import logging
+    import socket
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+
+    try:
+        local_ip = socket.gethostbyname(socket.gethostname())
+    except Exception:
+        local_ip = "127.0.0.1"
+
+    print(f"[dashboard] http://localhost:{port}  |  http://{local_ip}:{port}", flush=True)
+    print(f"[dashboard] Remote: ngrok http {port}", flush=True)
+
+    t = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False),
+        daemon=True,
+    )
+    t.start()
+
+
+# ── Embedded HTML ─────────────────────────────────────────────────────────────
+
+_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NBA Props</title>
+<style>
+:root {
+  --bg:#0d1117; --card:#161b22; --border:#30363d;
+  --green:#3fb950; --red:#f85149; --yellow:#d29922; --blue:#58a6ff;
+  --text:#e6edf3; --muted:#8b949e; --r:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:12px;max-width:900px;margin:0 auto}
+a{color:inherit;text-decoration:none}
+/* header */
+header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px}
+h1{font-size:1.15rem;color:var(--green)}
+#pnl{font-size:.8rem;color:var(--muted)}
+.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:6px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+/* cards */
+.cards{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
+@media(min-width:520px){.cards{grid-template-columns:repeat(4,1fr)}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:14px 12px}
+.card-label{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
+.card-value{font-size:1.35rem;font-weight:700}
+.green{color:var(--green)} .red{color:var(--red)} .yellow{color:var(--yellow)} .blue{color:var(--blue)}
+/* book pills */
+.books-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:center}
+.book-pill{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:5px 13px;font-size:.78rem;cursor:pointer;user-select:none;transition:border-color .15s,color .15s}
+.book-pill.on{border-color:var(--green);color:var(--green)}
+.book-pill.off{border-color:var(--border);color:var(--muted)}
+/* sections */
+section{background:var(--card);border:1px solid var(--border);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
+.sec-hdr{padding:10px 14px;border-bottom:1px solid var(--border);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);display:flex;align-items:center;justify-content:space-between}
+.bet-row{padding:11px 14px;border-bottom:1px solid var(--border)}
+.bet-row:last-child{border-bottom:none}
+.bet-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px}
+.player{font-weight:600;font-size:.92rem}
+.edge{font-size:.68rem;background:rgba(63,185,80,.15);color:var(--green);border-radius:4px;padding:2px 6px}
+.game-label{font-size:.72rem;color:var(--muted)}
+.bet-meta{font-size:.78rem;color:var(--muted);margin-bottom:6px}
+.over{color:var(--green)} .under{color:var(--blue)}
+.actions{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+input[type=number]{background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 7px;width:65px;font-size:.82rem}
+button{border:none;border-radius:4px;padding:6px 13px;font-size:.78rem;font-weight:700;cursor:pointer;transition:opacity .15s}
+button:active{opacity:.7}
+.btn-place{background:var(--green);color:#000}
+.btn-skip{background:var(--border);color:var(--muted)}
+.btn-win{background:var(--green);color:#000}
+.btn-loss{background:var(--red);color:#fff}
+.btn-push{background:var(--yellow);color:#000}
+.btn-blue{background:var(--blue);color:#000}
+.empty{padding:20px 14px;color:var(--muted);font-size:.82rem;text-align:center}
+/* config */
+.cfg-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px}
+@media(min-width:520px){.cfg-grid{grid-template-columns:repeat(3,1fr)}}
+.cfg-item label{display:block;font-size:.67rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.cfg-item input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:.88rem}
+.cfg-foot{padding:0 14px 14px;display:flex;gap:8px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="dot"></span>NBA Props</h1>
+  <div id="pnl">connecting...</div>
+</header>
+
+<div class="cards">
+  <div class="card"><div class="card-label">Total Balance</div><div class="card-value" id="c-bal">—</div></div>
+  <div class="card"><div class="card-label">Wagered</div><div class="card-value yellow" id="c-wag">—</div></div>
+  <div class="card"><div class="card-label">To Gain</div><div class="card-value green" id="c-gain">—</div></div>
+  <div class="card"><div class="card-label">At Risk</div><div class="card-value red" id="c-risk">—</div></div>
+</div>
+
+<div class="books-row" id="books-row"></div>
+
+<section>
+  <div class="sec-hdr"><span>Potential Bets</span><span id="pot-count"></span></div>
+  <div id="pot-list"><div class="empty">No bets yet — screener starting...</div></div>
+</section>
+
+<section>
+  <div class="sec-hdr"><span>Open Bets</span><span id="open-count"></span></div>
+  <div id="open-list"><div class="empty">No open bets</div></div>
+</section>
+
+<section>
+  <div class="sec-hdr"><span>Config</span>
+    <span style="font-size:.72rem;color:var(--muted)">changes apply on next screener tick</span>
+  </div>
+  <div class="cfg-grid">
+    <div class="cfg-item"><label>Min Edge %</label><input type="number" id="cfg-edge" step="0.5" min="0"></div>
+    <div class="cfg-item"><label>Min Line Diff</label><input type="number" id="cfg-diff" step="0.5" min="0"></div>
+    <div class="cfg-item"><label>Interval (s)</label><input type="number" id="cfg-int" step="30" min="30"></div>
+  </div>
+  <div class="cfg-foot">
+    <button class="btn-blue" id="cfg-save" onclick="saveConfig()">Save Config</button>
+    <button class="btn-skip" onclick="refreshLines()">Force Lines Refresh</button>
+  </div>
+</section>
+
+<script>
+let _state = {};
+
+// ── SSE ───────────────────────────────────────────────────────────────────────
+const es = new EventSource('/events');
+es.onmessage = e => {
+  const d = JSON.parse(e.data);
+  if (d.ping) return;
+  _state = d;
+  render(d);
+};
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const sgn = n => (n >= 0 ? '+' : '') + '$' + Math.abs(n).toFixed(0);
+const fmtOdds = n => (n > 0 ? '+' : '') + n;
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
+
+// ── Render ────────────────────────────────────────────────────────────────────
+function render(d) {
+  // Cards
+  const balClass = d.total_balance >= 0 ? 'green' : 'red';
+  $('c-bal').className = 'card-value ' + balClass;
+  $('c-bal').textContent = '$' + d.total_balance.toFixed(0);
+  $('c-wag').textContent = '$' + d.wagered.toFixed(0);
+  $('c-gain').textContent = '+$' + d.to_gain.toFixed(0);
+  $('c-risk').textContent = '-$' + d.to_lose.toFixed(0);
+  $('pnl').textContent = `Today ${sgn(d.today_pnl)}  |  Overall ${sgn(d.overall_pnl)}`;
+
+  // Books row
+  const bi = d.book_info || {};
+  const row = $('books-row');
+  row.innerHTML = '';
+  Object.entries(bi).forEach(([book, info]) => {
+    const pill = document.createElement('div');
+    pill.className = 'book-pill ' + (info.active ? 'on' : 'off');
+    pill.innerHTML = `<strong>${cap(book)}</strong>  $${info.avail.toFixed(0)} avail / $${info.total.toFixed(0)} total`;
+    pill.onclick = () => toggleBook(book, info.active);
+    row.appendChild(pill);
+  });
+
+  // Potential bets
+  const pot = (d.potential_bets || []).filter(b => !b.skipped);
+  $('pot-count').textContent = `${pot.length} available`;
+  const pl = $('pot-list');
+  if (!pot.length) {
+    pl.innerHTML = '<div class="empty">No bets available right now</div>';
+  } else {
+    pl.innerHTML = pot.map(b => {
+      const sid = safeId(b.key);
+      const sideClass = b.side === 'OVER' ? 'over' : 'under';
+      return `<div class="bet-row">
+        <div class="bet-top">
+          <span class="player">${b.player}</span>
+          <span class="edge">${b.edge_pct}% edge</span>
+          <span class="game-label">${b.game}</span>
+        </div>
+        <div class="bet-meta">
+          ${b.market} &nbsp;·&nbsp;
+          <span class="${sideClass}">${b.side} ${b.line}</span>
+          &nbsp;·&nbsp; ${fmtOdds(b.odds)}
+          &nbsp;·&nbsp; ${cap(b.bookmaker)}
+          &nbsp;·&nbsp; pred: ${b.prediction}
+        </div>
+        <div class="actions">
+          $<input type="number" id="amt-${sid}" value="${b.suggested}" min="1" step="1">
+          <button class="btn-place" onclick="placeBet(${JSON.stringify(b.key)})">Place</button>
+          <button class="btn-skip" onclick="skipBet(${JSON.stringify(b.key)})">Skip</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // Open bets
+  const open = d.open_bets || [];
+  $('open-count').textContent = `${open.length} pending`;
+  const ol = $('open-list');
+  if (!open.length) {
+    ol.innerHTML = '<div class="empty">No open bets</div>';
+  } else {
+    ol.innerHTML = open.map(b => {
+      const sideClass = b.side === 'OVER' ? 'over' : 'under';
+      return `<div class="bet-row">
+        <div class="bet-top">
+          <span class="player">${b.player}</span>
+          <span class="game-label">${b.date} &nbsp;·&nbsp; ${cap(b.bookmaker)}</span>
+        </div>
+        <div class="bet-meta">
+          ${b.market} &nbsp;·&nbsp;
+          <span class="${sideClass}">${b.side} ${b.line}</span>
+          &nbsp;·&nbsp; ${fmtOdds(b.odds)}
+          &nbsp;·&nbsp; <strong>$${b.entered}</strong> to win <strong class="green">$${b.to_win.toFixed(2)}</strong>
+        </div>
+        <div class="actions">
+          <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">WIN</button>
+          <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">LOSS</button>
+          <button class="btn-push" onclick="settle(${b.tracker_idx},'PUSH')">PUSH</button>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  // Config
+  if (d.config) {
+    $('cfg-edge').value = d.config.min_edge;
+    $('cfg-diff').value = d.config.min_diff;
+    $('cfg-int').value  = d.config.interval;
+  }
+}
+
+// ── Actions ───────────────────────────────────────────────────────────────────
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (!r.ok) alert(d.error || 'Error');
+  return r.ok;
+}
+
+async function placeBet(key) {
+  const sid = safeId(key);
+  const amt = parseFloat($('amt-' + sid)?.value || 0);
+  if (!amt || amt <= 0) return alert('Enter an amount > 0');
+  await post('/api/place', {key, amount: amt});
+}
+
+async function skipBet(key) {
+  await post('/api/skip', {key});
+}
+
+async function settle(idx, result) {
+  await post('/api/settle', {tracker_idx: idx, result});
+}
+
+async function toggleBook(book, currently_on) {
+  const books = [...(_state.active_books || [])];
+  const i = books.indexOf(book);
+  if (currently_on && i >= 0) books.splice(i, 1);
+  else if (!currently_on && i < 0) books.push(book);
+  await post('/api/config', {books});
+}
+
+async function saveConfig() {
+  const ok = await post('/api/config', {
+    min_edge: parseFloat($('cfg-edge').value),
+    min_diff: parseFloat($('cfg-diff').value),
+    interval: parseInt($('cfg-int').value),
+  });
+  if (ok) {
+    const btn = $('cfg-save');
+    btn.textContent = 'Saved \u2713';
+    setTimeout(() => btn.textContent = 'Save Config', 2000);
+  }
+}
+
+async function refreshLines() {
+  await post('/api/config', {refresh_lines: true});
+}
+</script>
+</body>
+</html>"""

@@ -1047,8 +1047,16 @@ if __name__ == "__main__":
         "skipped_keys": set(),       # keys declined this session
         "lines_cache": None,         # cached pd.DataFrame from last API fetch
         "lines_fetched_at": 0.0,     # epoch seconds of last fetch
+        # dashboard-settable config (dashboard may override these at runtime)
+        "min_edge": args.min_edge,
+        "min_diff": args.min_diff,
+        "interval": args.interval,
+        "active_books": list(bookmaker),
     }
     _latest_lock = _threading.Lock()
+
+    from dashboard import start_dashboard, broadcast_state as _broadcast
+    start_dashboard(_st, _latest_lock)
 
     def _position(r) -> tuple:
         return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
@@ -1099,10 +1107,10 @@ if __name__ == "__main__":
                     with contextlib.redirect_stdout(_buf):
                         bets = run_screener(
                             bankroll=bankroll,
-                            min_edge=args.min_edge,
-                            min_diff=args.min_diff,
+                            min_edge=_st.get("min_edge", args.min_edge),
+                            min_diff=_st.get("min_diff", args.min_diff),
                             debug=args.debug,
-                            bookmaker_filter=bookmaker,
+                            bookmaker_filter=_st.get("active_books", bookmaker),
                             book_tradeable=_st["book_balances"],
                             lines_df=_st["lines_cache"].copy() if _st["lines_cache"] is not None else None,
                         )
@@ -1162,12 +1170,14 @@ if __name__ == "__main__":
                         with _latest_lock:
                             _st["shown_bet_key"] = top_key
 
+                    _broadcast()
+
                 except Exception as _e:
                     import traceback
                     print(f"[error] {_e}", flush=True)
                     traceback.print_exc()
 
-                _stop.wait(args.interval)
+                _stop.wait(_st.get("interval", args.interval))
 
         except Exception as _fatal:
             import traceback
