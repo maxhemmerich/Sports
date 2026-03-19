@@ -1130,17 +1130,25 @@ if __name__ == "__main__":
                         if _position(row) not in placed_positions
                     } if not bets.empty else set()
 
+                    # Always keep the full current unplaced list fresh (odds change each iteration)
+                    if not bets.empty and unplaced_keys:
+                        unplaced_bets = bets[
+                            [_bet_key(row) in unplaced_keys for _, row in bets.iterrows()]
+                        ].reset_index(drop=True)
+                    else:
+                        unplaced_bets = pd.DataFrame()
+                    with _latest_lock:
+                        _st["latest_bets"] = unplaced_bets
+
                     new_keys = unplaced_keys - _st["prev_unplaced_keys"]
                     if new_keys:
                         new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
                         print("\n" + "=" * 90)
                         print(f"NEW BETS  |  {_balance_header(_st['book_balances'])}")
                         print("=" * 90)
-                        _print_bet_list(new_bets)
-                        print(format_output(new_bets))
+                        _print_bet_list(unplaced_bets)
+                        print(format_output(unplaced_bets))
                         print()
-                        with _latest_lock:
-                            _st["latest_bets"] = new_bets.reset_index(drop=True)
                         _notify(new_bets)
                         _st["book_balances"] = _get_book_balances()
 
