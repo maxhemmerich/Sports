@@ -44,8 +44,9 @@ RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
 DEFAULT_BOOKS = ["draftkings", "fanduel"]
-LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))    # seconds between screener runs
-LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))  # print timestamp every N iterations
+LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))          # seconds between screener runs
+LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))     # print timestamp every N iterations
+LINES_REFRESH_SECS = int(os.getenv("LINES_REFRESH_SECS", "900"))  # re-fetch odds API every 15 min
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
 SIGMA_BY_MARKET = {
@@ -1028,6 +1029,8 @@ if __name__ == "__main__":
         "iteration": 0,
         "book_balances": book_balances,
         "latest_bets": pd.DataFrame(),
+        "lines_cache": None,       # cached pd.DataFrame from last API fetch
+        "lines_fetched_at": 0.0,   # epoch seconds of last fetch
     }
     _latest_lock = _threading.Lock()
 
@@ -1057,7 +1060,25 @@ if __name__ == "__main__":
 
                     bankroll = _total_bankroll(_st["book_balances"]) or BANKROLL
 
-                    import io as _io
+                    import io as _io, time as _time
+                    _now = _time.monotonic()
+                    _cache_age = _now - _st["lines_fetched_at"]
+                    if _st["lines_cache"] is None or _cache_age >= LINES_REFRESH_SECS:
+                        _fetch_buf = _io.StringIO()
+                        with contextlib.redirect_stdout(_fetch_buf):
+                            from odds import get_today_lines as _gtl
+                            _fresh_lines = _gtl()
+                        _fetch_out = _fetch_buf.getvalue().strip()
+                        ts = _dt.now().strftime('%H:%M:%S')
+                        if _fresh_lines.empty:
+                            print(f"[{ts}] lines refresh — no lines returned", flush=True)
+                            for _l in _fetch_out.splitlines():
+                                print(f"  {_l}", flush=True)
+                        else:
+                            print(f"[{ts}] lines refresh — {len(_fresh_lines)} props fetched", flush=True)
+                        _st["lines_cache"] = _fresh_lines
+                        _st["lines_fetched_at"] = _now
+
                     _buf = _io.StringIO()
                     with contextlib.redirect_stdout(_buf):
                         bets = run_screener(
@@ -1067,6 +1088,7 @@ if __name__ == "__main__":
                             debug=args.debug,
                             bookmaker_filter=bookmaker,
                             book_tradeable=_st["book_balances"],
+                            lines_df=_st["lines_cache"].copy() if _st["lines_cache"] is not None else None,
                         )
                     # Print the screener summary line (last line of captured output)
                     _screener_out = _buf.getvalue().strip()
