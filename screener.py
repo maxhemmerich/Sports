@@ -1172,7 +1172,7 @@ if __name__ == "__main__":
             except EOFError:
                 break
             with _latest_lock:
-                current_bets = _latest_bets[0].copy()
+                current_bets = _st["latest_bets"].copy()
             if current_bets.empty:
                 print("[tracker] No bets found yet.", flush=True)
             elif not raw:
