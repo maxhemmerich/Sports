@@ -161,38 +161,57 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
 
 def get_today_lines() -> pd.DataFrame:
     """
-    Fetch today's NBA player prop lines live from the API every run.
-    Always returns current odds — no caching.
+    Fetch today's NBA player prop lines using the bulk odds endpoint.
+    Costs 1 API credit regardless of how many games are on — vs 1+N_games
+    with the per-event approach.
     """
-    today = date.today().isoformat()
+    now_utc = datetime.now(timezone.utc)
+    window_end = now_utc + timedelta(hours=48)
 
-    events = fetch_today_events()
-    if not events:
-        print("[odds] No NBA events found for today.")
+    # Single bulk request: all events + all bookmakers in one call
+    data = _get(
+        f"/sports/{SPORT}/odds",
+        params={
+            "regions": REGIONS,
+            "markets": MARKETS,
+            "oddsFormat": "american",
+        },
+    )
+
+    if not data:
+        print("[odds] No NBA events found.")
         return pd.DataFrame()
 
+    # Filter to games commencing within the next 48 hours
     all_frames = []
-    for ev in events:
-        event_id = ev["id"]
+    for ev in data:
+        commence_str = ev.get("commence_time", "")
+        try:
+            commence_dt = datetime.fromisoformat(commence_str.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        if not (now_utc <= commence_dt <= window_end):
+            continue
+
         home = ev.get("home_team", "")
         away = ev.get("away_team", "")
-        commence = ev.get("commence_time", "")
-        ev_date = commence[:10] if commence else today
-        print(f"  Fetching props: {away} @ {home}")
-        try:
-            bookmakers = fetch_event_props(event_id, ev_date)
-            df = parse_props(bookmakers)
-            if not df.empty:
-                df["event_id"] = event_id
-                df["home_team"] = home
-                df["away_team"] = away
-                df["commence_time"] = commence
-                all_frames.append(df)
-        except requests.HTTPError as e:
-            print(f"  [warn] {event_id}: {e}")
+        event_id = ev.get("id", "")
+        bookmakers = ev.get("bookmakers", [])
+        if not bookmakers:
+            continue
+
+        df = parse_props(bookmakers)
+        if not df.empty:
+            df["event_id"] = event_id
+            df["home_team"] = home
+            df["away_team"] = away
+            df["commence_time"] = commence_str
+            all_frames.append(df)
+
+    print(f"  [api] {len(all_frames)} games with prop lines in next 48h")
 
     if not all_frames:
-        print("[odds] No prop lines found for today's games.")
+        print("[odds] No prop lines found for upcoming games.")
         return pd.DataFrame()
 
     return pd.concat(all_frames, ignore_index=True)
