@@ -1178,6 +1178,11 @@ if __name__ == "__main__":
                     _log_balance(_st["book_balances"])
                     _broadcast()
 
+                    if _st["iteration"] % LOOP_PRINT_EVERY == 0:
+                        ts = _dt.now().strftime('%H:%M:%S')
+                        n = len(unplaced_bets) if not unplaced_bets.empty else 0
+                        print(f"[{ts}] tick {_st['iteration']} — {n} bet{'s' if n != 1 else ''} available", flush=True)
+
                 except Exception as _e:
                     import traceback
                     print(f"[error] {_e}", flush=True)
