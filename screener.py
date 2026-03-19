@@ -45,6 +45,7 @@ CURRENT_SEASON_START = "2025-10-01"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
+BALANCE_LOG_PATH = RESULTS_DIR / "balance_log.csv"
 DEFAULT_BOOKS = ["draftkings", "fanduel"]
 LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))          # seconds between screener runs
 LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))     # print timestamp every N iterations
@@ -755,6 +756,24 @@ def _calc_pnl(since_date: str | None = None) -> float:
         return 0.0
 
 
+def _log_balance(book_balances: dict) -> None:
+    """Append today's total balance to the balance log (one row per day, last wins)."""
+    try:
+        total = _total_bankroll(book_balances)
+        today = date.today().isoformat()
+        row = f"{today},{total:.2f}\n"
+        if BALANCE_LOG_PATH.exists():
+            lines = BALANCE_LOG_PATH.read_text().splitlines(keepends=True)
+            # replace today's row if already present
+            lines = [l for l in lines if not l.startswith(today + ",")]
+        else:
+            lines = ["date,balance\n"]
+        lines.append(row)
+        BALANCE_LOG_PATH.write_text("".join(lines))
+    except Exception:
+        pass
+
+
 def _pnl_str() -> str:
     """Return a compact 'Today $X.XX  |  Overall $X.XX' PnL string."""
     today = date.today().isoformat()
@@ -1173,6 +1192,7 @@ if __name__ == "__main__":
                         with _latest_lock:
                             _st["shown_bet_key"] = top_key
 
+                    _log_balance(_st["book_balances"])
                     _broadcast()
 
                 except Exception as _e:

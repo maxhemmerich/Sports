@@ -210,37 +210,53 @@ def sse():
 
 @app.route("/api/pnl_history")
 def api_pnl_history():
-    from screener import TRACKER_PATH
-    if not TRACKER_PATH.exists():
-        return jsonify({"dates": [], "values": []})
-    try:
-        df = pd.read_csv(TRACKER_PATH)
-        settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
-        if settled.empty:
-            return jsonify({"dates": [], "values": []})
-        settled["date"] = settled["date"].astype(str).str.strip()
-        settled = settled.sort_values("date")
-        daily: list[tuple[str, float]] = []
-        for date_str, group in settled.groupby("date", sort=False):
-            day_pnl = 0.0
-            for _, row in group.iterrows():
+    from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT
+
+    # ── Try settled-bet cumulative PnL first ──────────────────────────────────
+    settled_daily: dict[str, float] = {}
+    if TRACKER_PATH.exists():
+        try:
+            df = pd.read_csv(TRACKER_PATH)
+            settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
+            settled["date"] = settled["date"].astype(str).str.strip()
+            for _, row in settled.iterrows():
                 result = str(row["result"]).strip().upper()
                 amt = float(row.get("entered_$", 0) or 0)
                 odds = float(row.get("odds", 0) or 0)
+                d = str(row["date"])
                 if result == "WIN":
-                    day_pnl += amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
+                    settled_daily[d] = settled_daily.get(d, 0.0) + (
+                        amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
+                    )
                 elif result == "LOSS":
-                    day_pnl -= amt
-            daily.append((date_str, day_pnl))
-        daily.sort(key=lambda x: x[0])
+                    settled_daily[d] = settled_daily.get(d, 0.0) - amt
+        except Exception:
+            pass
+
+    if settled_daily:
+        items = sorted(settled_daily.items())
         dates, values, running = [], [], 0.0
-        for d, v in daily:
+        for d, v in items:
             running += v
             dates.append(d)
             values.append(round(running, 2))
-        return jsonify({"dates": dates, "values": values})
-    except Exception as e:
-        return jsonify({"dates": [], "values": [], "error": str(e)})
+        return jsonify({"dates": dates, "values": values, "mode": "pnl"})
+
+    # ── Fall back to balance log (shows total balance over time) ──────────────
+    if BALANCE_LOG_PATH.exists():
+        try:
+            bl = pd.read_csv(BALANCE_LOG_PATH)
+            bl = bl.dropna().sort_values("date")
+            if not bl.empty:
+                dates = bl["date"].astype(str).tolist()
+                # Express as profit vs deposit so y-axis matches PnL mode
+                deposit = DEPOSIT or float(bl["balance"].iloc[0])
+                values = [round(float(b) - deposit, 2) for b in bl["balance"]]
+                return jsonify({"dates": dates, "values": values, "mode": "balance"})
+        except Exception:
+            pass
+
+    return jsonify({"dates": [], "values": [], "mode": "empty"})
 
 
 @app.route("/api/place", methods=["POST"])
@@ -457,8 +473,8 @@ button:active{opacity:.7}
 
 <div class="books-row" id="books-row"></div>
 
-<section id="chart-section" style="display:none">
-  <div class="sec-hdr"><span>Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span></div>
+<section id="chart-section">
+  <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span></div>
   <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:160px"></canvas></div>
 </section>
 
@@ -661,20 +677,33 @@ async function refreshLines() {
 // ── P&L Chart ─────────────────────────────────────────────────────────────────
 let _chartDates = [], _chartValues = [];
 
+let _chartMode = 'empty';
 async function loadChart() {
   try {
     const r = await fetch('/api/pnl_history');
     const d = await r.json();
     _chartDates = d.dates || [];
     _chartValues = d.values || [];
+    _chartMode = d.mode || 'empty';
+    const title = $('chart-title');
+    if (title) title.textContent = _chartMode === 'balance' ? 'Balance vs Deposit' : 'Cumulative P&L';
     drawChart();
   } catch(e) {}
 }
 
 function drawChart() {
   const sec = $('chart-section');
-  if (!_chartDates.length) { sec.style.display = 'none'; return; }
   sec.style.display = '';
+  const canvas = $('pnl-chart');
+  if (!_chartDates.length) {
+    const ctx2 = canvas.getContext('2d');
+    canvas.width = canvas.offsetWidth || 800; canvas.height = 80;
+    ctx2.clearRect(0,0,canvas.width,canvas.height);
+    ctx2.fillStyle='#8b949e'; ctx2.font='13px sans-serif'; ctx2.textAlign='center';
+    ctx2.fillText('No data yet — chart appears after first screener tick', canvas.width/2, 44);
+    $('chart-range').textContent = '';
+    return;
+  }
   const canvas = $('pnl-chart');
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.offsetWidth || 800, H = 160;
