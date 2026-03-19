@@ -1179,11 +1179,20 @@ if __name__ == "__main__":
                 raw = input().strip()
             except EOFError:
                 break
+            if raw.lower() in ("r", "refresh"):
+                with _latest_lock:
+                    _st["lines_fetched_at"] = 0.0  # force re-fetch on next loop tick
+                print("[screener] Odds refresh queued — will fetch on next loop tick (~60s)", flush=True)
+                continue
             with _latest_lock:
                 current_bets = _st["latest_bets"].copy()
+                import time as _time_ui
+                _age = _time_ui.monotonic() - _st["lines_fetched_at"]
             if current_bets.empty:
                 print("[tracker] No bets found yet.", flush=True)
             elif not raw:
+                _age_str = f"{int(_age // 60)}m{int(_age % 60)}s"
+                print(f"[odds age: {_age_str}]", flush=True)
                 _print_bet_list(current_bets)
             else:
                 _log_slip(current_bets, raw)
