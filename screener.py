@@ -1029,6 +1029,7 @@ if __name__ == "__main__":
         "iteration": 0,
         "book_balances": book_balances,
         "latest_bets": pd.DataFrame(),
+        "displayed_bets": pd.DataFrame(),  # snapshot at last Enter-print; used for slip logging
         "lines_cache": None,       # cached pd.DataFrame from last API fetch
         "lines_fetched_at": 0.0,   # epoch seconds of last fetch
     }
@@ -1184,18 +1185,27 @@ if __name__ == "__main__":
                     _st["lines_fetched_at"] = 0.0  # force re-fetch on next loop tick
                 print("[screener] Odds refresh queued — will fetch on next loop tick (~60s)", flush=True)
                 continue
-            with _latest_lock:
-                current_bets = _st["latest_bets"].copy()
-                import time as _time_ui
-                _age = _time_ui.monotonic() - _st["lines_fetched_at"]
-            if current_bets.empty:
-                print("[tracker] No bets found yet.", flush=True)
-            elif not raw:
-                _age_str = f"{int(_age // 60)}m{int(_age % 60)}s"
-                print(f"[odds age: {_age_str}]", flush=True)
-                _print_bet_list(current_bets)
+            if not raw:
+                # Refresh the snapshot — numbers will match what's on screen
+                with _latest_lock:
+                    import time as _time_ui
+                    _age = _time_ui.monotonic() - _st["lines_fetched_at"]
+                    snap = _st["latest_bets"].copy()
+                    _st["displayed_bets"] = snap
+                if snap.empty:
+                    print("[tracker] No bets found yet.", flush=True)
+                else:
+                    _age_str = f"{int(_age // 60)}m{int(_age % 60)}s"
+                    print(f"[odds age: {_age_str}]", flush=True)
+                    _print_bet_list(snap)
             else:
-                _log_slip(current_bets, raw)
+                # Log against the frozen snapshot, not the live list
+                with _latest_lock:
+                    log_bets = _st["displayed_bets"].copy()
+                if log_bets.empty:
+                    print("[tracker] Press Enter first to display the list before logging.", flush=True)
+                else:
+                    _log_slip(log_bets, raw)
     except KeyboardInterrupt:
         pass
 
