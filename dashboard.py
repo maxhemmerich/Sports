@@ -41,7 +41,7 @@ def _american_to_decimal(odds: float) -> float:
 
 def _build_state() -> dict:
     from screener import (  # lazy — avoids circular import at module load
-        TRACKER_PATH, DEFAULT_BOOKS,
+        TRACKER_PATH, DEFAULT_BOOKS, DEPOSIT,
         _calc_pnl, _at_risk_per_book,
         _bet_key, _position,
     )
@@ -132,6 +132,8 @@ def _build_state() -> dict:
     return {
         "book_info": book_info,
         "total_balance": round(total_balance, 2),
+        "deposit": round(DEPOSIT, 2),
+        "net_profit": round(total_balance - DEPOSIT, 2) if DEPOSIT > 0 else None,
         "wagered": round(wagered, 2),
         "to_gain": round(to_gain, 2),
         "to_lose": round(to_lose, 2),
@@ -204,6 +206,41 @@ def sse():
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
     return resp
+
+
+@app.route("/api/pnl_history")
+def api_pnl_history():
+    from screener import TRACKER_PATH
+    if not TRACKER_PATH.exists():
+        return jsonify({"dates": [], "values": []})
+    try:
+        df = pd.read_csv(TRACKER_PATH)
+        settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
+        if settled.empty:
+            return jsonify({"dates": [], "values": []})
+        settled["date"] = settled["date"].astype(str).str.strip()
+        settled = settled.sort_values("date")
+        daily: list[tuple[str, float]] = []
+        for date_str, group in settled.groupby("date", sort=False):
+            day_pnl = 0.0
+            for _, row in group.iterrows():
+                result = str(row["result"]).strip().upper()
+                amt = float(row.get("entered_$", 0) or 0)
+                odds = float(row.get("odds", 0) or 0)
+                if result == "WIN":
+                    day_pnl += amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
+                elif result == "LOSS":
+                    day_pnl -= amt
+            daily.append((date_str, day_pnl))
+        daily.sort(key=lambda x: x[0])
+        dates, values, running = [], [], 0.0
+        for d, v in daily:
+            running += v
+            dates.append(d)
+            values.append(round(running, 2))
+        return jsonify({"dates": dates, "values": values})
+    except Exception as e:
+        return jsonify({"dates": [], "values": [], "error": str(e)})
 
 
 @app.route("/api/place", methods=["POST"])
@@ -363,7 +400,8 @@ h1{font-size:1.15rem;color:var(--green)}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 /* cards */
 .cards{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-bottom:14px}
-@media(min-width:520px){.cards{grid-template-columns:repeat(4,1fr)}}
+@media(min-width:520px){.cards{grid-template-columns:repeat(3,1fr)}}
+@media(min-width:700px){.cards{grid-template-columns:repeat(5,1fr)}}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:14px 12px}
 .card-label{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
 .card-value{font-size:1.35rem;font-weight:700}
@@ -411,12 +449,18 @@ button:active{opacity:.7}
 
 <div class="cards">
   <div class="card"><div class="card-label">Total Balance</div><div class="card-value" id="c-bal">—</div></div>
+  <div class="card"><div class="card-label">Net Profit</div><div class="card-value" id="c-net">—</div></div>
   <div class="card"><div class="card-label">Wagered</div><div class="card-value yellow" id="c-wag">—</div></div>
   <div class="card"><div class="card-label">To Gain</div><div class="card-value green" id="c-gain">—</div></div>
   <div class="card"><div class="card-label">At Risk</div><div class="card-value red" id="c-risk">—</div></div>
 </div>
 
 <div class="books-row" id="books-row"></div>
+
+<section id="chart-section" style="display:none">
+  <div class="sec-hdr"><span>Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span></div>
+  <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:160px"></canvas></div>
+</section>
 
 <section>
   <div class="sec-hdr"><span>Potential Bets</span><span id="pot-count"></span></div>
@@ -468,6 +512,14 @@ function render(d) {
   const balClass = d.total_balance >= 0 ? 'green' : 'red';
   $('c-bal').className = 'card-value ' + balClass;
   $('c-bal').textContent = '$' + d.total_balance.toFixed(0);
+  if (d.net_profit !== null && d.net_profit !== undefined) {
+    const np = d.net_profit;
+    $('c-net').className = 'card-value ' + (np >= 0 ? 'green' : 'red');
+    $('c-net').textContent = (np >= 0 ? '+' : '') + '$' + np.toFixed(2);
+  } else {
+    $('c-net').className = 'card-value muted';
+    $('c-net').textContent = 'set DEPOSIT';
+  }
   $('c-wag').textContent = '$' + d.wagered.toFixed(0);
   $('c-gain').textContent = '+$' + d.to_gain.toFixed(0);
   $('c-risk').textContent = '-$' + d.to_lose.toFixed(0);
@@ -605,6 +657,90 @@ async function saveConfig() {
 async function refreshLines() {
   await post('/api/config', {refresh_lines: true});
 }
+
+// ── P&L Chart ─────────────────────────────────────────────────────────────────
+let _chartDates = [], _chartValues = [];
+
+async function loadChart() {
+  try {
+    const r = await fetch('/api/pnl_history');
+    const d = await r.json();
+    _chartDates = d.dates || [];
+    _chartValues = d.values || [];
+    drawChart();
+  } catch(e) {}
+}
+
+function drawChart() {
+  const sec = $('chart-section');
+  if (!_chartDates.length) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  const canvas = $('pnl-chart');
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.offsetWidth || 800, H = 160;
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const pad = {top:12, right:12, bottom:28, left:52};
+  const cw = W - pad.left - pad.right;
+  const ch = H - pad.top  - pad.bottom;
+
+  const min = Math.min(0, ...(_chartValues)), max = Math.max(0, ...(_chartValues));
+  const range = max - min || 1;
+  const toX = i => pad.left + (i / Math.max(_chartValues.length - 1, 1)) * cw;
+  const toY = v => pad.top  + ch - ((v - min) / range) * ch;
+  const zero = toY(0);
+
+  // grid lines
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+  for (let t of [min, 0, max]) {
+    if (t === min && t === max) continue;
+    const y = toY(t);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
+  }
+
+  // zero label
+  ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText('$0', pad.left - 4, zero + 3);
+  if (min < 0)  ctx.fillText('$' + min.toFixed(0),  pad.left - 4, toY(min) + 3);
+  if (max > 0)  ctx.fillText('+$' + max.toFixed(0), pad.left - 4, toY(max) + 3);
+
+  // fill area
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+  const lastVal = _chartValues[_chartValues.length - 1];
+  const lineColor = lastVal >= 0 ? '#3fb950' : '#f85149';
+  grad.addColorStop(0,   lastVal >= 0 ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
+  grad.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.beginPath();
+  ctx.moveTo(toX(0), zero);
+  _chartValues.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
+  ctx.lineTo(toX(_chartValues.length - 1), zero);
+  ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  // line
+  ctx.beginPath();
+  ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+  _chartValues.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+  ctx.stroke();
+
+  // x-axis labels (first, last, maybe mid)
+  ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+  const showIdx = [0, Math.floor((_chartDates.length-1)/2), _chartDates.length-1].filter((v,i,a)=>a.indexOf(v)===i && _chartDates[v]);
+  showIdx.forEach(i => ctx.fillText(_chartDates[i].slice(5), toX(i), H - 6));
+
+  $('chart-range').textContent = _chartDates[0] + ' → ' + _chartDates[_chartDates.length - 1];
+}
+
+// Load chart on page load and refresh after settling a bet
+loadChart();
+const _origSettle = settle;
+settle = async (idx, result) => { await _origSettle(idx, result); loadChart(); };
+window.addEventListener('resize', drawChart);
 </script>
 </body>
 </html>"""

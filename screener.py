@@ -33,6 +33,7 @@ from odds import get_today_lines, american_to_decimal, implied_probability
 # ── Config ────────────────────────────────────────────────────────────────────
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")   # set in .env to enable push notifications via ntfy.sh
 BANKROLL = float(os.getenv("BANKROLL", "100"))        # starting bankroll in $
+DEPOSIT  = float(os.getenv("DEPOSIT",  "0"))          # total cash deposited (for net-profit display)
 MIN_EDGE_PCT = float(os.getenv("MIN_EDGE_PCT", "4"))  # minimum edge % to flag
 MIN_LINE_DIFF = float(os.getenv("MIN_LINE_DIFF", "1.5"))  # minimum |pred - line| pts
 MAX_KELLY_FRACTION = float(os.getenv("MAX_KELLY_FRACTION", "0.05"))  # cap at 5% per bet
