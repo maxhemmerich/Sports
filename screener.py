@@ -850,6 +850,16 @@ def prompt_bookmaker(lines_df: pd.DataFrame) -> list[str] | None:
     return None
 
 
+def _print_single_bet(row, label: str = "") -> None:
+    mkt = str(row.get("market", "")).replace("player_", "")
+    book = str(row.get("bookmaker", "?"))
+    in_play = " *IN-PLAY*" if row.get("in_play") else ""
+    prefix = f"[{label}]  " if label else ""
+    print(f"\n{'─'*60}", flush=True)
+    print(f"{prefix}{row['player']}{in_play} | {mkt} | {row['side']} {row['line']} @ {int(row['odds']):+d} | {book}", flush=True)
+    print(f"Suggested: ${int(row['bet_dollars'])}   — place it? (y / y $AMT / n):", flush=True)
+
+
 def _print_bet_list(bets_df: pd.DataFrame) -> None:
     """Print numbered bet list (shared by prompt and loop input thread)."""
     print("\n" + "=" * 60)
@@ -1032,9 +1042,11 @@ if __name__ == "__main__":
         "iteration": 0,
         "book_balances": book_balances,
         "latest_bets": pd.DataFrame(),
-        "displayed_bets": pd.DataFrame(),  # snapshot at last Enter-print; used for slip logging
-        "lines_cache": None,       # cached pd.DataFrame from last API fetch
-        "lines_fetched_at": 0.0,   # epoch seconds of last fetch
+        "placed_positions": set(),   # positions already in tracker
+        "shown_bet_key": None,       # key of bet currently on screen
+        "skipped_keys": set(),       # keys declined this session
+        "lines_cache": None,         # cached pd.DataFrame from last API fetch
+        "lines_fetched_at": 0.0,     # epoch seconds of last fetch
     }
     _latest_lock = _threading.Lock()
 
@@ -1094,29 +1106,12 @@ if __name__ == "__main__":
                             book_tradeable=_st["book_balances"],
                             lines_df=_st["lines_cache"].copy() if _st["lines_cache"] is not None else None,
                         )
-                    # Print the screener summary line (last line of captured output)
                     _screener_out = _buf.getvalue().strip()
-                    ts = _dt.now().strftime('%H:%M:%S')
-                    if _screener_out:
-                        _lines = _screener_out.splitlines()
-                        _summary = next(
-                            (l for l in reversed(_lines) if "Lines evaluated" in l or "No +EV" in l or "No lines" in l or "bankroll" in l.lower()),
-                            None,
-                        )
-                        if bets.empty and "No lines" in _screener_out:
-                            # Something wrong upstream — print full API diagnostics once per LOOP_PRINT_EVERY
-                            if _st["iteration"] % LOOP_PRINT_EVERY == 1:
-                                print(f"[{ts}] === screener diagnostics ===", flush=True)
-                                for _l in _lines:
-                                    print(f"  {_l}", flush=True)
-                            else:
-                                print(f"[{ts}] {_summary.strip() if _summary else 'No lines (see diagnostics above)'}", flush=True)
-                        elif _summary:
-                            print(f"[{ts}] {_summary.strip()}", flush=True)
-                        elif _st["iteration"] % LOOP_PRINT_EVERY == 1:
-                            print(f"[{ts}] Checking props ... bankroll=${bankroll:.0f}", flush=True)
                     if args.debug:
                         print(_screener_out, flush=True)
+                    elif bets.empty and "No lines" in _screener_out:
+                        ts = _dt.now().strftime('%H:%M:%S')
+                        print(f"[{ts}] No lines returned — check API", flush=True)
 
                     placed_positions: set = set()
                     if TRACKER_PATH.exists():
@@ -1134,29 +1129,38 @@ if __name__ == "__main__":
                         if _position(row) not in placed_positions
                     } if not bets.empty else set()
 
-                    # Always keep the full current unplaced list fresh (odds change each iteration)
                     if not bets.empty and unplaced_keys:
                         unplaced_bets = bets[
                             [_bet_key(row) in unplaced_keys for _, row in bets.iterrows()]
                         ].reset_index(drop=True)
                     else:
                         unplaced_bets = pd.DataFrame()
-                    with _latest_lock:
-                        _st["latest_bets"] = unplaced_bets
 
                     new_keys = unplaced_keys - _st["prev_unplaced_keys"]
                     if new_keys:
                         new_bets = bets[[_bet_key(row) in new_keys for _, row in bets.iterrows()]]
-                        print("\n" + "=" * 90)
-                        print(f"NEW BETS  |  {_balance_header(_st['book_balances'])}")
-                        print("=" * 90)
-                        _print_bet_list(unplaced_bets)
-                        print(format_output(unplaced_bets))
-                        print()
                         _notify(new_bets)
                         _st["book_balances"] = _get_book_balances()
 
                     _st["prev_unplaced_keys"] = unplaced_keys
+
+                    with _latest_lock:
+                        _st["latest_bets"] = unplaced_bets
+                        _st["placed_positions"] = placed_positions
+                        # If the top available bet changed, show it
+                        skipped = _st["skipped_keys"]
+                        shown = _st["shown_bet_key"]
+                    top_row = next(
+                        (r for _, r in unplaced_bets.iterrows()
+                         if _bet_key(r) not in skipped),
+                        None,
+                    )
+                    top_key = _bet_key(top_row) if top_row is not None else None
+                    if top_key is not None and top_key != shown:
+                        label = "NEW TOP BET" if shown is not None else "TOP BET"
+                        _print_single_bet(top_row, label)
+                        with _latest_lock:
+                            _st["shown_bet_key"] = top_key
 
                 except Exception as _e:
                     import traceback
@@ -1176,39 +1180,90 @@ if __name__ == "__main__":
     _loop_thread = _threading.Thread(target=_screener_loop, daemon=True)
     _loop_thread.start()
 
-    # Main thread: accept slip input without blocking the loop
+    def _advance_bet(skipped_keys=None) -> None:
+        """Find next available bet and print it."""
+        import re as _re2
+        with _latest_lock:
+            bets_df = _st["latest_bets"].copy()
+            placed = _st["placed_positions"].copy()
+            skipped = set(_st["skipped_keys"])
+        if skipped_keys:
+            skipped |= skipped_keys
+        row = next(
+            (r for _, r in bets_df.iterrows()
+             if _position(r) not in placed and _bet_key(r) not in skipped),
+            None,
+        )
+        if row is None:
+            print("\n[screener] No more bets available right now.", flush=True)
+            with _latest_lock:
+                _st["shown_bet_key"] = None
+        else:
+            _print_single_bet(row)
+            with _latest_lock:
+                _st["shown_bet_key"] = _bet_key(row)
+
+    # Main thread: respond to y/n prompts
     try:
+        import re as _re2
         while not _stop.is_set():
             try:
-                raw = input().strip()
+                raw = input().strip().lower()
             except EOFError:
                 break
-            if raw.lower() in ("r", "refresh"):
+
+            if raw in ("r", "refresh"):
                 with _latest_lock:
-                    _st["lines_fetched_at"] = 0.0  # force re-fetch on next loop tick
-                print("[screener] Odds refresh queued — will fetch on next loop tick (~60s)", flush=True)
+                    _st["lines_fetched_at"] = 0.0
+                print("[screener] Odds refresh queued.", flush=True)
                 continue
-            if not raw:
-                # Refresh the snapshot — numbers will match what's on screen
+
+            with _latest_lock:
+                shown_key = _st["shown_bet_key"]
+                bets_df = _st["latest_bets"].copy()
+
+            if shown_key is None:
+                _advance_bet()
+                continue
+
+            # Find the row for the currently shown bet
+            shown_row = next(
+                (r for _, r in bets_df.iterrows() if _bet_key(r) == shown_key),
+                None,
+            )
+
+            if raw == "n":
                 with _latest_lock:
-                    import time as _time_ui
-                    _age = _time_ui.monotonic() - _st["lines_fetched_at"]
-                    snap = _st["latest_bets"].copy()
-                    _st["displayed_bets"] = snap
-                if snap.empty:
-                    print("[tracker] No bets found yet.", flush=True)
+                    _st["skipped_keys"].add(shown_key)
+                print("  [skipped]", flush=True)
+                _advance_bet({shown_key})
+
+            elif raw.startswith("y"):
+                # Parse optional amount: "y" or "y $5" or "y 5"
+                amt_match = _re2.search(r"[\d.]+", raw[1:])
+                if amt_match:
+                    amt = float(amt_match.group())
+                elif shown_row is not None:
+                    amt = float(shown_row["bet_dollars"])
                 else:
-                    _age_str = f"{int(_age // 60)}m{int(_age % 60)}s"
-                    print(f"[odds age: {_age_str}]", flush=True)
-                    _print_bet_list(snap)
+                    print("  [error] Could not determine amount.", flush=True)
+                    continue
+                if shown_row is not None:
+                    mask = [_bet_key(r) == shown_key for _, r in bets_df.iterrows()]
+                    single = bets_df[mask].reset_index(drop=True)
+                    _log_slip(single, f"1 ${amt:.0f}")
+                with _latest_lock:
+                    _st["shown_bet_key"] = None
+                _advance_bet()
+
+            elif not raw:
+                # Re-display the current bet
+                if shown_row is not None:
+                    _print_single_bet(shown_row)
+                else:
+                    _advance_bet()
             else:
-                # Log against the frozen snapshot, not the live list
-                with _latest_lock:
-                    log_bets = _st["displayed_bets"].copy()
-                if log_bets.empty:
-                    print("[tracker] Press Enter first to display the list before logging.", flush=True)
-                else:
-                    _log_slip(log_bets, raw)
+                print("  y  (place at suggested)  |  y $AMT  |  n  (skip)  |  r  (refresh odds)", flush=True)
     except KeyboardInterrupt:
         pass
 
