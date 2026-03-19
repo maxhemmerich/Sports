@@ -704,7 +704,6 @@ function drawChart() {
     $('chart-range').textContent = '';
     return;
   }
-  const canvas = $('pnl-chart');
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.offsetWidth || 800, H = 160;
   canvas.width  = W * dpr;
