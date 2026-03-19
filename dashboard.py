@@ -186,8 +186,11 @@ def sse():
         # initial snapshot
         try:
             yield f"data: {json.dumps(_build_state())}\n\n"
-        except Exception:
-            pass
+        except Exception as _e:
+            import traceback
+            print(f"[dashboard] SSE init error: {_e}", flush=True)
+            traceback.print_exc()
+            yield 'data: {"error":"state build failed"}\n\n'
         while True:
             try:
                 data = q.get(timeout=30)

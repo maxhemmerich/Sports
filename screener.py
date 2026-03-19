@@ -993,6 +993,21 @@ def format_output(df: pd.DataFrame) -> str:
     return display[avail].to_string(index=False)
 
 
+def _bet_key(r) -> tuple:
+    """Normalised key so screener rows and tracker CSV rows compare equal."""
+    return (
+        str(r["player"]).strip(),
+        str(r["market"]).strip(),
+        str(r["side"]).strip().upper(),
+        float(r["line"]),
+        str(r["bookmaker"]).strip().lower() if "bookmaker" in r and r["bookmaker"] == r["bookmaker"] else "",
+    )
+
+
+def _position(r) -> tuple:
+    return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
+
+
 if __name__ == "__main__":
     import contextlib
     import time as _time
@@ -1012,16 +1027,6 @@ if __name__ == "__main__":
 
     # Ask for current tradeable balance on each book (syncs with reality)
     book_balances = prompt_book_balances()
-
-    def _bet_key(r) -> tuple:
-        """Normalised key so screener rows and tracker CSV rows compare equal."""
-        return (
-            str(r["player"]).strip(),
-            str(r["market"]).strip(),
-            str(r["side"]).strip().upper(),
-            float(r["line"]),
-            str(r["bookmaker"]).strip().lower() if "bookmaker" in r and r["bookmaker"] == r["bookmaker"] else "",
-        )
 
     def _balance_header(book_balances: dict) -> str:
         at_risk = _at_risk_per_book()
@@ -1057,9 +1062,6 @@ if __name__ == "__main__":
 
     from dashboard import start_dashboard, broadcast_state as _broadcast
     start_dashboard(_st, _latest_lock)
-
-    def _position(r) -> tuple:
-        return (str(r["player"]).strip(), str(r["market"]).strip(), str(r["side"]).strip().upper())
 
     print(f"\n[screener] Running — check every {args.interval}s, print every {LOOP_PRINT_EVERY} iterations  |  Ctrl-C to stop")
     print("[screener] Type a slip at any time to log bets (e.g.  1 $10 2 $5), or Enter to see the list again.", flush=True)
