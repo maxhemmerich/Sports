@@ -105,6 +105,22 @@ def _build_state() -> dict:
             pass
 
     # ── Potential bets ────────────────────────────────────────────────────────
+    def _sf(v, d=0.0):
+        """Safe float: return d if v is NaN/None/non-numeric."""
+        try:
+            f = float(v)
+            return f if f == f else d  # NaN check
+        except (TypeError, ValueError):
+            return d
+
+    def _si(v, d=0):
+        """Safe int."""
+        try:
+            f = float(v)
+            return int(f) if f == f else d
+        except (TypeError, ValueError):
+            return d
+
     potential: list[dict] = []
     if not bets.empty:
         for _, row in bets.iterrows():
@@ -114,13 +130,13 @@ def _build_state() -> dict:
                 "key": list(key),
                 "player": str(row["player"]),
                 "market": mkt,
-                "line": float(row["line"]),
+                "line": _sf(row.get("line")),
                 "side": str(row["side"]),
-                "odds": int(row["odds"]),
+                "odds": _si(row.get("odds"), -110),
                 "bookmaker": str(row.get("bookmaker", "")),
-                "suggested": int(row["bet_dollars"]),
-                "edge_pct": round(float(row.get("edge_pct", 0)), 1),
-                "prediction": round(float(row.get("prediction", 0)), 1),
+                "suggested": _si(row.get("bet_dollars")),
+                "edge_pct": round(_sf(row.get("edge_pct")), 1),
+                "prediction": round(_sf(row.get("prediction")), 1),
                 "game": str(row.get("game", "")),
                 "skipped": key in skipped,
             })
@@ -346,6 +362,23 @@ def api_settle():
     return jsonify({"ok": True})
 
 
+@app.route("/api/balances", methods=["POST"])
+def api_balances():
+    from screener import _save_state, _get_book_balances
+    body = request.json or {}
+    balances = _get_book_balances()
+    for book, amount in body.items():
+        try:
+            balances[str(book).lower()] = float(amount)
+        except (TypeError, ValueError):
+            pass
+    _save_state({"book_balances": balances})
+    with _lock:
+        _st["book_balances"] = balances
+    broadcast_state()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/config", methods=["POST"])
 def api_config():
     body = request.json or {}
@@ -489,6 +522,16 @@ button:active{opacity:.7}
 </section>
 
 <section>
+  <div class="sec-hdr"><span>Balances</span>
+    <span style="font-size:.72rem;color:var(--muted)">tradeable balance per book</span>
+  </div>
+  <div class="cfg-grid" id="bal-inputs"></div>
+  <div class="cfg-foot">
+    <button class="btn-blue" onclick="saveBalances()">Save Balances</button>
+  </div>
+</section>
+
+<section>
   <div class="sec-hdr"><span>Config</span>
     <span style="font-size:.72rem;color:var(--muted)">changes apply on next screener tick</span>
   </div>
@@ -509,10 +552,11 @@ let _state = {};
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
 es.onmessage = e => {
-  const d = JSON.parse(e.data);
-  if (d.ping) return;
+  let d;
+  try { d = JSON.parse(e.data); } catch(_) { return; }
+  if (d.ping || d.error) return;
   _state = d;
-  render(d);
+  try { render(d); } catch(err) { console.error('render error:', err, d); }
 };
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
@@ -620,6 +664,16 @@ function render(d) {
     $('cfg-diff').value = d.config.min_diff;
     $('cfg-int').value  = d.config.interval;
   }
+
+  // Balance inputs — only repopulate if user isn't focused on one
+  const focused = document.activeElement;
+  const balGrid = $('bal-inputs');
+  if (!balGrid.contains(focused)) {
+    balGrid.innerHTML = Object.entries(d.book_info || {}).map(([book, info]) =>
+      `<div class="cfg-item"><label>${cap(book)} ($)</label>` +
+      `<input type="number" id="bal-${book}" value="${info.avail.toFixed(0)}" min="0" step="1"></div>`
+    ).join('');
+  }
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -655,6 +709,15 @@ async function toggleBook(book, currently_on) {
   if (currently_on && i >= 0) books.splice(i, 1);
   else if (!currently_on && i < 0) books.push(book);
   await post('/api/config', {books});
+}
+
+async function saveBalances() {
+  const body = {};
+  Object.keys(_state.book_info || {}).forEach(book => {
+    const el = $('bal-' + book);
+    if (el) body[book] = parseFloat(el.value) || 0;
+  });
+  await post('/api/balances', body);
 }
 
 async function saveConfig() {

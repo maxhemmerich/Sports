@@ -1045,18 +1045,10 @@ if __name__ == "__main__":
     for _msg in auto_settle_bets():
         print(_msg)
 
-    # Ask for current tradeable balance on each book (syncs with reality)
-    book_balances = prompt_book_balances()
-
-    def _balance_header(book_balances: dict) -> str:
-        at_risk = _at_risk_per_book()
-        parts = []
-        for book in DEFAULT_BOOKS:
-            avail = book_balances.get(book, 0.0)
-            risk = at_risk.get(book, 0.0)
-            parts.append(f"{book.title()} ${avail:.0f} avail / ${avail + risk:.0f} total")
-        parts.append(_pnl_str())
-        return "  |  ".join(parts)
+    # Load saved balances (edit on the dashboard)
+    book_balances = _get_book_balances()
+    if not book_balances:
+        book_balances = {book: 0.0 for book in DEFAULT_BOOKS}
 
     import threading as _threading
 
