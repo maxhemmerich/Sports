@@ -139,6 +139,7 @@ def _build_state() -> dict:
                 "prediction": round(_sf(row.get("prediction")), 1),
                 "game": str(row.get("game", "")),
                 "skipped": key in skipped,
+                "placed": key in placed,
             })
 
     # ── PnL + chart history (single tracker read so chart == overall_pnl) ─────
@@ -349,6 +350,9 @@ def api_place():
         combined = new_df
     combined.to_csv(TRACKER_PATH, index=False)
     _update_book_balance(entry["bookmaker"].lower(), -amount)
+
+    with _lock:
+        _st.setdefault("placed_positions", set()).add(key)
 
     balances = _get_book_balances()
     summary = "  ".join(
@@ -666,7 +670,7 @@ function render(d) {
   });
 
   // Potential bets
-  const pot = (d.potential_bets || []).filter(b => !b.skipped);
+  const pot = (d.potential_bets || []).filter(b => !b.skipped && !b.placed);
   $('pot-count').textContent = `${pot.length} available`;
   const pl = $('pot-list');
   if (!pot.length) {
