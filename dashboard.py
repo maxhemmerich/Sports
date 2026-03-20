@@ -648,6 +648,7 @@ function render(d) {
   } else {
     pl.innerHTML = pot.map(b => {
       const sid = safeId(b.key);
+      const keyAttr = JSON.stringify(b.key).replace(/"/g, '&quot;');
       const sideClass = b.side === 'OVER' ? 'over' : 'under';
       return `<div class="bet-row">
         <div class="bet-top">
@@ -664,8 +665,8 @@ function render(d) {
         </div>
         <div class="actions">
           $<input type="number" id="amt-${sid}" value="${b.suggested}" min="1" step="1">
-          <button class="btn-place" onclick="placeBet(${JSON.stringify(b.key)})">Place</button>
-          <button class="btn-skip" onclick="skipBet(${JSON.stringify(b.key)})">Skip</button>
+          <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
+          <button class="btn-skip" onclick="skipBet(${keyAttr})">Skip</button>
         </div>
       </div>`;
     }).join('');
