@@ -547,9 +547,10 @@ button:active{opacity:.7}
 .empty{padding:20px 14px;color:var(--muted);font-size:.82rem;text-align:center}
 /* open bets tiles */
 .open-books{display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;align-items:flex-start}
-.open-book-col{flex:1;min-width:160px}
+.open-book-col{flex:1;min-width:300px}
 .open-book-hdr{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);border-bottom:1px solid var(--border);padding-bottom:5px;margin-bottom:6px}
-.open-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px}
+.open-tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.open-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px}
 .tile-player{font-weight:600;font-size:.85rem;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile-meta{font-size:.72rem;color:var(--muted);margin-bottom:5px;line-height:1.4}
 .tile-actions{display:flex;gap:4px}
@@ -723,7 +724,8 @@ function render(d) {
     ol.innerHTML = '<div class="open-books">' +
       Object.entries(byBook).map(([book, bets]) =>
         `<div class="open-book-col">
-          <div class="open-book-hdr">${cap(book)} (${bets.length})</div>` +
+          <div class="open-book-hdr">${cap(book)} (${bets.length})</div>
+          <div class="open-tile-grid">` +
           bets.map(b => {
             const sideClass = b.side === 'OVER' ? 'over' : 'under';
             return `<div class="open-tile">
@@ -739,6 +741,7 @@ function render(d) {
               </div>
             </div>`;
           }).join('') +
+          '</div>' +
         '</div>'
       ).join('') +
     '</div>';
