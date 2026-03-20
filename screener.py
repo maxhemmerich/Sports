@@ -472,6 +472,10 @@ def run_screener(
 
     bets_df = pd.DataFrame(results).sort_values("edge_pct", ascending=False).reset_index(drop=True)
 
+    # Cap to top N bets FIRST so scaling is based only on shown bets
+    if MAX_BETS > 0:
+        bets_df = bets_df.head(MAX_BETS).reset_index(drop=True)
+
     # Scale bets proportionally if total allocation exceeds MAX_TOTAL_EXPOSURE
     total_raw = bets_df["bet_dollars"].sum()
     if total_raw > max_exposure:
@@ -482,10 +486,6 @@ def run_screener(
 
     # Drop bets that round to $0 — not actionable
     bets_df = bets_df[bets_df["bet_dollars"] >= 1].reset_index(drop=True)
-
-    # Cap to top N bets by edge
-    if MAX_BETS > 0:
-        bets_df = bets_df.head(MAX_BETS).reset_index(drop=True)
 
     # Save results
     today = date.today().isoformat()

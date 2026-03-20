@@ -551,12 +551,15 @@ let _state = {};
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
+let _lastPnl = null;
 es.onmessage = e => {
   let d;
   try { d = JSON.parse(e.data); } catch(_) { return; }
   if (d.ping || d.error) return;
   _state = d;
   try { render(d); } catch(err) { console.error('render error:', err, d); }
+  // Reload chart if overall P&L changed (bet settled)
+  if (d.overall_pnl !== _lastPnl) { _lastPnl = d.overall_pnl; loadChart(); }
 };
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
