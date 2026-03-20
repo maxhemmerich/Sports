@@ -310,7 +310,7 @@ def api_pnl_history():
 
 @app.route("/api/place", methods=["POST"])
 def api_place():
-    from screener import _bet_key, _log_slip, _get_book_balances
+    from screener import _bet_key, _get_book_balances, _update_book_balance, TRACKER_PATH, DEFAULT_BOOKS
 
     body = request.json or {}
     key_raw = body.get("key")
@@ -328,10 +328,36 @@ def api_place():
     if row_df.empty:
         return jsonify({"error": "bet not found in current list"}), 404
 
-    _log_slip(row_df, f"1 ${amount:.0f}")
+    row = row_df.iloc[0]
+    entry = {
+        "date": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        "player": row["player"],
+        "market": row.get("market", ""),
+        "line": row["line"],
+        "side": row["side"],
+        "odds": row["odds"],
+        "bookmaker": row.get("bookmaker", ""),
+        "edge_pct": row["edge_pct"],
+        "suggested_$": row["bet_dollars"],
+        "entered_$": amount,
+        "result": "",
+    }
+    new_df = pd.DataFrame([entry])
+    if TRACKER_PATH.exists():
+        combined = pd.concat([pd.read_csv(TRACKER_PATH), new_df], ignore_index=True)
+    else:
+        combined = new_df
+    combined.to_csv(TRACKER_PATH, index=False)
+    _update_book_balance(entry["bookmaker"].lower(), -amount)
+
+    balances = _get_book_balances()
+    summary = "  ".join(
+        f"{book.title()} ${balances.get(book, 0):.0f} avail" for book in DEFAULT_BOOKS
+    )
+    print(f"\n[tracker] Logged {row['player']} {row['side']} {row['line']} ${amount:.0f}  |  {summary}", flush=True)
 
     with _lock:
-        _st["book_balances"] = _get_book_balances()
+        _st["book_balances"] = balances
 
     broadcast_state()
     return jsonify({"ok": True})
