@@ -545,6 +545,15 @@ button:active{opacity:.7}
 .btn-push{background:var(--yellow);color:#000}
 .btn-blue{background:var(--blue);color:#000}
 .empty{padding:20px 14px;color:var(--muted);font-size:.82rem;text-align:center}
+/* open bets tiles */
+.open-books{display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;align-items:flex-start}
+.open-book-col{flex:1;min-width:160px}
+.open-book-hdr{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);border-bottom:1px solid var(--border);padding-bottom:5px;margin-bottom:6px}
+.open-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px}
+.tile-player{font-weight:600;font-size:.85rem;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile-meta{font-size:.72rem;color:var(--muted);margin-bottom:5px;line-height:1.4}
+.tile-actions{display:flex;gap:4px}
+.tile-actions button{flex:1;padding:4px 0;font-size:.7rem}
 /* config */
 .cfg-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px}
 @media(min-width:520px){.cfg-grid{grid-template-columns:repeat(3,1fr)}}
@@ -702,33 +711,37 @@ function render(d) {
     }).join('');
   }
 
-  // Open bets
+  // Open bets — tiles grouped by book
   const open = d.open_bets || [];
   $('open-count').textContent = `${open.length} pending`;
   const ol = $('open-list');
   if (!open.length) {
     ol.innerHTML = '<div class="empty">No open bets</div>';
   } else {
-    ol.innerHTML = open.map(b => {
-      const sideClass = b.side === 'OVER' ? 'over' : 'under';
-      return `<div class="bet-row">
-        <div class="bet-top">
-          <span class="player">${b.player}</span>
-          <span class="game-label">${b.date} &nbsp;·&nbsp; ${cap(b.bookmaker)}</span>
-        </div>
-        <div class="bet-meta">
-          ${b.market} &nbsp;·&nbsp;
-          <span class="${sideClass}">${b.side} ${b.line}</span>
-          &nbsp;·&nbsp; ${fmtOdds(b.odds)}
-          &nbsp;·&nbsp; <strong>$${b.entered}</strong> to win <strong class="green">$${b.to_win.toFixed(2)}</strong>
-        </div>
-        <div class="actions">
-          <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">WIN</button>
-          <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">LOSS</button>
-          <button class="btn-push" onclick="settle(${b.tracker_idx},'PUSH')">PUSH</button>
-        </div>
-      </div>`;
-    }).join('');
+    const byBook = {};
+    open.forEach(b => { (byBook[b.bookmaker] = byBook[b.bookmaker] || []).push(b); });
+    ol.innerHTML = '<div class="open-books">' +
+      Object.entries(byBook).map(([book, bets]) =>
+        `<div class="open-book-col">
+          <div class="open-book-hdr">${cap(book)} (${bets.length})</div>` +
+          bets.map(b => {
+            const sideClass = b.side === 'OVER' ? 'over' : 'under';
+            return `<div class="open-tile">
+              <div class="tile-player">${b.player}</div>
+              <div class="tile-meta">
+                ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
+                <strong>$${b.entered}</strong> → <span class="green">+$${b.to_win.toFixed(0)}</span> · ${b.date}
+              </div>
+              <div class="tile-actions">
+                <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">W</button>
+                <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">L</button>
+                <button class="btn-push" onclick="settle(${b.tracker_idx},'PUSH')">P</button>
+              </div>
+            </div>`;
+          }).join('') +
+        '</div>'
+      ).join('') +
+    '</div>';
   }
 
   // Config
