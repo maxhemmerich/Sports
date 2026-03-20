@@ -865,13 +865,23 @@ function drawChart() {
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
 
-  const pad = {top:12, right:12, bottom:28, left:52};
+  const toGain = (_state.to_gain || 0);
+  const toLose = (_state.to_lose || 0);
+  const hasFork = toGain > 0 || toLose > 0;
+  const n = _chartValues.length;
+  const nSlots = n + (hasFork ? 1 : 0);
+  const lastVal = _chartValues[n - 1];
+  const gainVal = lastVal + toGain;
+  const lossVal = lastVal - toLose;
+
+  const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
   const ch = H - pad.top  - pad.bottom;
 
-  const min = Math.min(0, ...(_chartValues)), max = Math.max(0, ...(_chartValues));
+  const allVals = hasFork ? [..._chartValues, gainVal, lossVal] : _chartValues;
+  const min = Math.min(0, ...allVals), max = Math.max(0, ...allVals);
   const range = max - min || 1;
-  const toX = i => pad.left + (i / Math.max(_chartValues.length - 1, 1)) * cw;
+  const toX = i => pad.left + (i / Math.max(nSlots - 1, 1)) * cw;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
   const zero = toY(0);
 
@@ -883,37 +893,79 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
   }
 
-  // zero label
+  // y-axis labels
   ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
   ctx.fillText('$0', pad.left - 4, zero + 3);
   if (min < 0)  ctx.fillText('$' + min.toFixed(0),  pad.left - 4, toY(min) + 3);
   if (max > 0)  ctx.fillText('+$' + max.toFixed(0), pad.left - 4, toY(max) + 3);
 
-  // fill area
-  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-  const lastVal = _chartValues[_chartValues.length - 1];
+  // historical fill area
   const lineColor = lastVal >= 0 ? '#3fb950' : '#f85149';
-  grad.addColorStop(0,   lastVal >= 0 ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
-  grad.addColorStop(1,   'rgba(0,0,0,0)');
+  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+  grad.addColorStop(0, lastVal >= 0 ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.beginPath();
   ctx.moveTo(toX(0), zero);
   _chartValues.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
-  ctx.lineTo(toX(_chartValues.length - 1), zero);
+  ctx.lineTo(toX(n - 1), zero);
   ctx.closePath();
   ctx.fillStyle = grad; ctx.fill();
 
-  // line
+  // historical line
   ctx.beginPath();
   ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
   _chartValues.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
   ctx.stroke();
 
-  // x-axis labels (first, last, maybe mid)
-  ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-  const showIdx = [0, Math.floor((_chartDates.length-1)/2), _chartDates.length-1].filter((v,i,a)=>a.indexOf(v)===i && _chartDates[v]);
-  showIdx.forEach(i => ctx.fillText(_chartDates[i].slice(5), toX(i), H - 6));
+  if (hasFork) {
+    const forkX = toX(n - 1);
+    const tipX  = toX(n);
+    const originY = toY(lastVal);
+    const gainY   = toY(gainVal);
+    const lossY   = toY(lossVal);
 
-  $('chart-range').textContent = _chartDates[0] + ' → ' + _chartDates[_chartDates.length - 1];
+    // cone fill between branches
+    ctx.beginPath();
+    ctx.moveTo(forkX, originY);
+    ctx.lineTo(tipX, gainY);
+    ctx.lineTo(tipX, lossY);
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(139,148,158,0.1)';
+    ctx.fill();
+
+    // vertical separator at fork origin
+    ctx.save();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(forkX, pad.top); ctx.lineTo(forkX, pad.top + ch); ctx.stroke();
+
+    // gain branch (green dashed)
+    ctx.strokeStyle = '#3fb950'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(forkX, originY); ctx.lineTo(tipX, gainY); ctx.stroke();
+
+    // loss branch (red dashed)
+    ctx.strokeStyle = '#f85149';
+    ctx.beginPath(); ctx.moveTo(forkX, originY); ctx.lineTo(tipX, lossY); ctx.stroke();
+    ctx.restore();
+
+    // tip labels
+    ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#3fb950';
+    ctx.fillText('+$' + toGain.toFixed(0), tipX + 4, gainY + 4);
+    ctx.fillStyle = '#f85149';
+    ctx.fillText('-$' + toLose.toFixed(0),  tipX + 4, lossY + 4);
+
+    // "Today" x-axis label at fork tip
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('Today', tipX, H - 6);
+  }
+
+  // x-axis labels (first, mid, last historical — skip last when fork replaces it)
+  ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+  const showIdx = [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i && _chartDates[v]);
+  showIdx.filter(i => !(hasFork && i === n - 1)).forEach(i => ctx.fillText(_chartDates[i].slice(5), toX(i), H - 6));
+
+  $('chart-range').textContent = _chartDates[0] + ' → ' + (hasFork ? 'Today' : _chartDates[n - 1]);
 }
 
 // Chart updates via SSE state; redraw on resize only
