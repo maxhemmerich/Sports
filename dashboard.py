@@ -42,7 +42,7 @@ def _american_to_decimal(odds: float) -> float:
 def _build_state() -> dict:
     from screener import (  # lazy — avoids circular import at module load
         TRACKER_PATH, DEFAULT_BOOKS, DEPOSIT,
-        _calc_pnl, _at_risk_per_book,
+        _at_risk_per_book,
         _bet_key, _position,
     )
 
@@ -141,9 +141,40 @@ def _build_state() -> dict:
                 "skipped": key in skipped,
             })
 
-    # ── PnL ───────────────────────────────────────────────────────────────────
-    today_pnl = _calc_pnl(since_date=date.today().isoformat())
-    overall_pnl = _calc_pnl()
+    # ── PnL + chart history (single tracker read so chart == overall_pnl) ─────
+    today_pnl = 0.0
+    overall_pnl = 0.0
+    chart_dates: list[str] = []
+    chart_values: list[float] = []
+    try:
+        if TRACKER_PATH.exists():
+            _tr = pd.read_csv(TRACKER_PATH)
+            _settled = _tr[_tr["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
+            _today = date.today().isoformat()
+            _daily: dict[str, float] = {}
+            for _, _r in _settled.iterrows():
+                _res = str(_r.get("result", "")).strip().upper()
+                _amt = _sf(_r.get("entered_$", 0))
+                _odds = _sf(_r.get("odds", 0))
+                _d = str(_r.get("date", "")).strip()
+                if _res == "WIN":
+                    _profit = _amt * (_odds / 100) if _odds > 0 else (_amt * (100 / abs(_odds)) if _odds != 0 else 0.0)
+                elif _res == "LOSS":
+                    _profit = -_amt
+                else:
+                    _profit = 0.0
+                _daily[_d] = _daily.get(_d, 0.0) + _profit
+                overall_pnl += _profit
+                if _d == _today:
+                    today_pnl += _profit
+            if _daily:
+                _running = 0.0
+                for _d, _v in sorted(_daily.items()):
+                    _running += _v
+                    chart_dates.append(_d)
+                    chart_values.append(round(_running, 2))
+    except Exception:
+        pass
 
     return {
         "book_info": book_info,
@@ -159,6 +190,8 @@ def _build_state() -> dict:
         "open_bets": open_bets,
         "active_books": active_books,
         "config": cfg,
+        "chart_dates": chart_dates,
+        "chart_values": chart_values,
     }
 
 
@@ -551,15 +584,21 @@ let _state = {};
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
-let _lastPnl = null;
 es.onmessage = e => {
   let d;
   try { d = JSON.parse(e.data); } catch(_) { return; }
   if (d.ping || d.error) return;
   _state = d;
   try { render(d); } catch(err) { console.error('render error:', err, d); }
-  // Reload chart if overall P&L changed (bet settled)
-  if (d.overall_pnl !== _lastPnl) { _lastPnl = d.overall_pnl; loadChart(); }
+  // Update chart from SSE state (guaranteed same data as overall_pnl)
+  if (d.chart_dates && d.chart_dates.length) {
+    _chartDates = d.chart_dates;
+    _chartValues = d.chart_values;
+    _chartMode = 'pnl';
+    const title = $('chart-title');
+    if (title) title.textContent = 'Cumulative P&L';
+    drawChart();
+  }
 };
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
@@ -830,10 +869,7 @@ function drawChart() {
   $('chart-range').textContent = _chartDates[0] + ' → ' + _chartDates[_chartDates.length - 1];
 }
 
-// Load chart on page load and refresh after settling a bet
-loadChart();
-const _origSettle = settle;
-settle = async (idx, result) => { await _origSettle(idx, result); loadChart(); };
+// Chart updates via SSE state; redraw on resize only
 window.addEventListener('resize', drawChart);
 </script>
 </body>
