@@ -868,9 +868,12 @@ function drawChart() {
   const toGain = (_state.to_gain || 0);
   const toLose = (_state.to_lose || 0);
   const hasFork = toGain > 0 || toLose > 0;
+  const deposit = _state.deposit || 0;
   const n = _chartValues.length;
   const nSlots = n + (hasFork ? 1 : 0);
-  const lastVal = _chartValues[n - 1];
+  // offset all historical values by deposit so chart starts at deposit level
+  const chartVals = _chartValues.map(v => v + deposit);
+  const lastVal = chartVals[n - 1];
   const gainVal = lastVal + toGain;
   const lossVal = lastVal - toLose;
 
@@ -878,16 +881,16 @@ function drawChart() {
   const cw = W - pad.left - pad.right;
   const ch = H - pad.top  - pad.bottom;
 
-  const allVals = hasFork ? [..._chartValues, gainVal, lossVal] : _chartValues;
-  const min = Math.min(0, ...allVals), max = Math.max(0, ...allVals);
+  const allVals = hasFork ? [...chartVals, gainVal, lossVal] : chartVals;
+  const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
   const range = max - min || 1;
   const toX = i => pad.left + (i / Math.max(nSlots - 1, 1)) * cw;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
-  const zero = toY(0);
+  const zero = toY(deposit);
 
   // grid lines
   ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
-  for (let t of [min, 0, max]) {
+  for (let t of [min, deposit, max]) {
     if (t === min && t === max) continue;
     const y = toY(t);
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
@@ -895,18 +898,18 @@ function drawChart() {
 
   // y-axis labels
   ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-  ctx.fillText('$0', pad.left - 4, zero + 3);
-  if (min < 0)  ctx.fillText('$' + min.toFixed(0),  pad.left - 4, toY(min) + 3);
-  if (max > 0)  ctx.fillText('+$' + max.toFixed(0), pad.left - 4, toY(max) + 3);
+  ctx.fillText('$' + deposit.toFixed(0), pad.left - 4, zero + 3);
+  if (min < deposit)  ctx.fillText('$' + min.toFixed(0),  pad.left - 4, toY(min) + 3);
+  if (max > deposit)  ctx.fillText('$' + max.toFixed(0), pad.left - 4, toY(max) + 3);
 
   // historical fill area
-  const lineColor = lastVal >= 0 ? '#3fb950' : '#f85149';
+  const lineColor = lastVal >= deposit ? '#3fb950' : '#f85149';
   const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-  grad.addColorStop(0, lastVal >= 0 ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
+  grad.addColorStop(0, lastVal >= deposit ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
   grad.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.beginPath();
   ctx.moveTo(toX(0), zero);
-  _chartValues.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
+  chartVals.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
   ctx.lineTo(toX(n - 1), zero);
   ctx.closePath();
   ctx.fillStyle = grad; ctx.fill();
@@ -914,7 +917,7 @@ function drawChart() {
   // historical line
   ctx.beginPath();
   ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
-  _chartValues.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+  chartVals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
   ctx.stroke();
 
   if (hasFork) {
@@ -948,12 +951,12 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(forkX, originY); ctx.lineTo(tipX, lossY); ctx.stroke();
     ctx.restore();
 
-    // tip labels
+    // tip labels — show absolute balance at each outcome
     ctx.font = '10px sans-serif'; ctx.textAlign = 'left';
     ctx.fillStyle = '#3fb950';
-    ctx.fillText('+$' + toGain.toFixed(0), tipX + 4, gainY + 4);
+    ctx.fillText('$' + gainVal.toFixed(0), tipX + 4, gainY + 4);
     ctx.fillStyle = '#f85149';
-    ctx.fillText('-$' + toLose.toFixed(0),  tipX + 4, lossY + 4);
+    ctx.fillText('$' + lossVal.toFixed(0),  tipX + 4, lossY + 4);
 
     // "Today" x-axis label at fork tip
     ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
