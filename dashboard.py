@@ -624,7 +624,15 @@ let _state = {};
 
 // ── Initial load ──────────────────────────────────────────────────────────────
 fetch('/api/state').then(r => r.json()).then(d => {
-  if (!d.error) { _state = d; try { render(d); } catch(err) { console.error('render error:', err); } }
+  if (!d.error) {
+    _state = d;
+    try { render(d); } catch(err) { console.error('render error:', err); }
+    if (d.chart_dates && d.chart_dates.length) {
+      _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
+      const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
+      drawChart();
+    }
+  }
 }).catch(() => {});
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
