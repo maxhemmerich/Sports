@@ -570,7 +570,7 @@ button:active{opacity:.7}
 </header>
 
 <div class="cards">
-  <div class="card"><div class="card-label">Total Balance</div><div class="card-value" id="c-bal">—</div></div>
+  <div class="card"><div class="card-label">Tradeable Balance</div><div class="card-value" id="c-bal">—</div></div>
   <div class="card"><div class="card-label">Net Profit</div><div class="card-value" id="c-net">—</div></div>
   <div class="card"><div class="card-label">Wagered</div><div class="card-value yellow" id="c-wag">—</div></div>
   <div class="card"><div class="card-label">To Gain</div><div class="card-value green" id="c-gain">—</div></div>
@@ -874,14 +874,17 @@ function drawChart() {
   // offset all historical values by deposit so chart starts at deposit level
   const chartVals = _chartValues.map(v => v + deposit);
   const lastVal = chartVals[n - 1];
-  const gainVal = lastVal + toGain;
-  const lossVal = lastVal - toLose;
+  // fork starts from actual tradeable balance, not the settled-close value
+  const forkBase = (_state.total_balance !== undefined && _state.total_balance !== null)
+    ? _state.total_balance : lastVal;
+  const gainVal = forkBase + toGain;
+  const lossVal = forkBase - toLose;
 
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
   const ch = H - pad.top  - pad.bottom;
 
-  const allVals = hasFork ? [...chartVals, gainVal, lossVal] : chartVals;
+  const allVals = hasFork ? [...chartVals, forkBase, gainVal, lossVal] : chartVals;
   const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
   const range = max - min || 1;
   const toX = i => pad.left + (i / Math.max(nSlots - 1, 1)) * cw;
@@ -921,9 +924,9 @@ function drawChart() {
   ctx.stroke();
 
   if (hasFork) {
-    const forkX = toX(n - 1);
-    const tipX  = toX(n);
-    const originY = toY(lastVal);
+    const forkX   = toX(n - 1);
+    const tipX    = toX(n);
+    const originY = toY(forkBase);   // fork anchors to actual tradeable balance
     const gainY   = toY(gainVal);
     const lossY   = toY(lossVal);
 
