@@ -876,8 +876,8 @@ function drawChart() {
   // fork starts from actual tradeable balance, not the settled-close value
   const forkBase = (_state.total_balance !== undefined && _state.total_balance !== null)
     ? _state.total_balance : lastVal;
-  const gainVal = forkBase + toGain;
-  const lossVal = forkBase - toLose;
+  const gainVal = lastVal + toGain;   // win: recover stake + profit
+  const lossVal = forkBase;           // lose: just liquid balance remains
   const nSlots = n + (hasFork ? 1 : 0);
 
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
