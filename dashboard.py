@@ -867,6 +867,7 @@ function drawChart() {
   const sec = $('chart-section');
   sec.style.display = '';
   const canvas = $('pnl-chart');
+  if (canvas.offsetWidth === 0) { requestAnimationFrame(drawChart); return; }
   if (!_chartDates.length) {
     const ctx2 = canvas.getContext('2d');
     canvas.width = canvas.offsetWidth || 800; canvas.height = 80;
