@@ -622,6 +622,11 @@ button:active{opacity:.7}
 <script>
 let _state = {};
 
+// ── Initial load ──────────────────────────────────────────────────────────────
+fetch('/api/state').then(r => r.json()).then(d => {
+  if (!d.error) { _state = d; try { render(d); } catch(err) { console.error('render error:', err); } }
+}).catch(() => {});
+
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
 es.onmessage = e => {
