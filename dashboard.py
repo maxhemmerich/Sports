@@ -917,27 +917,17 @@ function drawChart() {
   ctx.closePath();
   ctx.fillStyle = grad; ctx.fill();
 
-  // historical line (solid), then dashed connector down to forkBase
+  // historical line
   ctx.beginPath();
   ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
   ctx.setLineDash([]);
   chartVals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
   ctx.stroke();
-  if (hasFork && forkBase !== lastVal) {
-    ctx.save();
-    ctx.setLineDash([3, 3]);
-    ctx.strokeStyle = lineColor; ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(toX(n - 1), toY(lastVal));
-    ctx.lineTo(toX(n - 1), toY(forkBase));
-    ctx.stroke();
-    ctx.restore();
-  }
 
   if (hasFork) {
     const forkX   = toX(n - 1);
     const tipX    = toX(n);
-    const originY = toY(forkBase);   // fork anchors to actual tradeable balance
+    const originY = toY(lastVal);    // fork vertex at history line end
     const gainY   = toY(gainVal);
     const lossY   = toY(lossVal);
 
