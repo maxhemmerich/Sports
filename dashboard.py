@@ -870,7 +870,6 @@ function drawChart() {
   const hasFork = toGain > 0 || toLose > 0;
   const deposit = _state.deposit || 0;
   const n = _chartValues.length;
-  const nSlots = n + (hasFork ? 1 : 0);
   // offset all historical values by deposit so chart starts at deposit level
   const chartVals = _chartValues.map(v => v + deposit);
   const lastVal = chartVals[n - 1];
@@ -879,6 +878,7 @@ function drawChart() {
     ? _state.total_balance : lastVal;
   const gainVal = forkBase + toGain;
   const lossVal = forkBase - toLose;
+  const nSlots = n + (hasFork ? 1 : 0);
 
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
@@ -905,7 +905,7 @@ function drawChart() {
   if (min < deposit)  ctx.fillText('$' + min.toFixed(0),  pad.left - 4, toY(min) + 3);
   if (max > deposit)  ctx.fillText('$' + max.toFixed(0), pad.left - 4, toY(max) + 3);
 
-  // historical fill area
+  // historical fill area (solid history only, not the connector to forkBase)
   const lineColor = lastVal >= deposit ? '#3fb950' : '#f85149';
   const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
   grad.addColorStop(0, lastVal >= deposit ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
@@ -917,11 +917,22 @@ function drawChart() {
   ctx.closePath();
   ctx.fillStyle = grad; ctx.fill();
 
-  // historical line
+  // historical line (solid), then dashed connector down to forkBase
   ctx.beginPath();
   ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+  ctx.setLineDash([]);
   chartVals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
   ctx.stroke();
+  if (hasFork && forkBase !== lastVal) {
+    ctx.save();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = lineColor; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(toX(n - 1), toY(lastVal));
+    ctx.lineTo(toX(n - 1), toY(forkBase));
+    ctx.stroke();
+    ctx.restore();
+  }
 
   if (hasFork) {
     const forkX   = toX(n - 1);
