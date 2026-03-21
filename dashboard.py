@@ -777,19 +777,26 @@ async function post(url, body) {
   return r.ok;
 }
 
+async function refreshState() {
+  try {
+    const r = await fetch('/api/state');
+    if (r.ok) { const d = await r.json(); _state = d; render(d); }
+  } catch(_) {}
+}
+
 async function placeBet(key) {
   const sid = safeId(key);
   const amt = parseFloat($('amt-' + sid)?.value || 0);
   if (!amt || amt <= 0) return alert('Enter an amount > 0');
-  await post('/api/place', {key, amount: amt});
+  if (await post('/api/place', {key, amount: amt})) await refreshState();
 }
 
 async function skipBet(key) {
-  await post('/api/skip', {key});
+  if (await post('/api/skip', {key})) await refreshState();
 }
 
 async function settle(idx, result) {
-  await post('/api/settle', {tracker_idx: idx, result});
+  if (await post('/api/settle', {tracker_idx: idx, result})) await refreshState();
 }
 
 async function toggleBook(book, currently_on) {
