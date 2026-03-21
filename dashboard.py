@@ -410,7 +410,7 @@ def api_settle():
 
     dec = _american_to_decimal(odds)
     if result == "WIN":
-        delta = stake * (dec - 1)
+        delta = stake * dec  # stake returned + profit
     elif result == "PUSH":
         delta = stake  # return stake
     else:
@@ -977,8 +977,7 @@ function drawChart() {
   // x-axis labels (first, mid, last historical — skip last when fork replaces it)
   ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
   const showIdx = [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i && _chartDates[v]);
-  const fmtLabel = s => s.length > 10 ? s.slice(5, 13) : s.slice(5); // "MM-DD HH" for hourly, "MM-DD" for daily
-  showIdx.filter(i => !(hasFork && i === n - 1)).forEach(i => ctx.fillText(fmtLabel(_chartDates[i]), toX(i), H - 6));
+  showIdx.filter(i => !(hasFork && i === n - 1)).forEach(i => ctx.fillText(_chartDates[i].slice(5), toX(i), H - 6));
 
   $('chart-range').textContent = _chartDates[0] + ' → ' + (hasFork ? 'Today' : _chartDates[n - 1]);
 }

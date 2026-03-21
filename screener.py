@@ -16,7 +16,7 @@ import json
 import os
 import sys
 import unicodedata
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -588,7 +588,7 @@ def auto_settle_bets(already_reported: set | None = None) -> list[str]:
         stake = float(row.get("entered_$", 0))
         if result == "WIN":
             dec = american_to_decimal(float(row["odds"]))
-            delta = stake * (dec - 1)
+            delta = stake * dec  # stake returned + profit
         elif result == "PUSH":
             delta = stake
         else:
@@ -757,23 +757,17 @@ def _calc_pnl(since_date: str | None = None) -> float:
 
 
 def _log_balance(book_balances: dict) -> None:
-    """Log total balance at most once per hour, only when the value changes."""
+    """Append today's total balance to the balance log (one row per day, last wins)."""
     try:
         total = _total_bankroll(book_balances)
-        slot = datetime.now().strftime("%Y-%m-%d %H:00")
+        today = date.today().isoformat()
+        row = f"{today},{total:.2f}\n"
         if BALANCE_LOG_PATH.exists():
             lines = BALANCE_LOG_PATH.read_text().splitlines(keepends=True)
-            # check last logged value — skip if unchanged
-            data_lines = [l for l in lines if l.strip() and not l.startswith("date,")]
-            if data_lines:
-                last_val = float(data_lines[-1].split(",")[1])
-                if abs(last_val - total) < 0.01:
-                    return
-            # replace current hour's row if already present
-            lines = [l for l in lines if not l.startswith(slot + ",")]
+            lines = [l for l in lines if not l.startswith(today + ",")]
         else:
             lines = ["date,balance\n"]
-        lines.append(f"{slot},{total:.2f}\n")
+        lines.append(row)
         BALANCE_LOG_PATH.write_text("".join(lines))
     except Exception:
         pass
