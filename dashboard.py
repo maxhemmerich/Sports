@@ -643,7 +643,7 @@ es.onmessage = e => {
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
-const sgn = n => (n >= 0 ? '+' : '') + '$' + Math.abs(n).toFixed(0);
+const sgn = n => (n >= 0 ? '+' : '') + '$' + Math.abs(n).toFixed(2);
 const fmtOdds = n => (n > 0 ? '+' : '') + n;
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
@@ -653,7 +653,7 @@ function render(d) {
   // Cards
   const balClass = d.total_balance >= 0 ? 'green' : 'red';
   $('c-bal').className = 'card-value ' + balClass;
-  $('c-bal').textContent = '$' + d.total_balance.toFixed(0);
+  $('c-bal').textContent = '$' + d.total_balance.toFixed(2);
   if (d.net_profit !== null && d.net_profit !== undefined) {
     const np = d.net_profit;
     $('c-net').className = 'card-value ' + (np >= 0 ? 'green' : 'red');
@@ -662,9 +662,9 @@ function render(d) {
     $('c-net').className = 'card-value muted';
     $('c-net').textContent = 'set DEPOSIT';
   }
-  $('c-wag').textContent = '$' + d.wagered.toFixed(0);
-  $('c-gain').textContent = '+$' + d.to_gain.toFixed(0);
-  $('c-risk').textContent = '-$' + d.to_lose.toFixed(0);
+  $('c-wag').textContent = '$' + d.wagered.toFixed(2);
+  $('c-gain').textContent = '+$' + d.to_gain.toFixed(2);
+  $('c-risk').textContent = '-$' + d.to_lose.toFixed(2);
   $('pnl').textContent = `Today ${sgn(d.today_pnl)}  |  Overall ${sgn(d.overall_pnl)}`;
 
   // Books row
@@ -674,7 +674,7 @@ function render(d) {
   Object.entries(bi).forEach(([book, info]) => {
     const pill = document.createElement('div');
     pill.className = 'book-pill ' + (info.active ? 'on' : 'off');
-    pill.innerHTML = `<strong>${cap(book)}</strong>  $${info.avail.toFixed(0)} avail / $${info.total.toFixed(0)} total`;
+    pill.innerHTML = `<strong>${cap(book)}</strong>  $${info.avail.toFixed(2)} avail / $${info.total.toFixed(2)} total`;
     pill.onclick = () => toggleBook(book, info.active);
     row.appendChild(pill);
   });
@@ -704,7 +704,7 @@ function render(d) {
           &nbsp;·&nbsp; pred: ${b.prediction}
         </div>
         <div class="actions">
-          $<input type="number" id="amt-${sid}" value="${b.suggested}" min="1" step="1">
+          $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
           <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
           <button class="btn-skip" onclick="skipBet(${keyAttr})">Skip</button>
         </div>
@@ -732,7 +732,7 @@ function render(d) {
               <div class="tile-player">${b.player}</div>
               <div class="tile-meta">
                 ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
-                <strong>$${b.entered}</strong> → <span class="green">+$${b.to_win.toFixed(0)}</span> · ${b.date}
+                <strong>$${b.entered.toFixed(2)}</strong> → <span class="green">+$${b.to_win.toFixed(2)}</span> · ${b.date}
               </div>
               <div class="tile-actions">
                 <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">W</button>
@@ -760,7 +760,7 @@ function render(d) {
   if (!balGrid.contains(focused)) {
     balGrid.innerHTML = Object.entries(d.book_info || {}).map(([book, info]) =>
       `<div class="cfg-item"><label>${cap(book)} ($)</label>` +
-      `<input type="number" id="bal-${book}" value="${info.avail.toFixed(0)}" min="0" step="1"></div>`
+      `<input type="number" id="bal-${book}" value="${info.avail.toFixed(2)}" min="0" step="0.01"></div>`
     ).join('');
   }
 }
