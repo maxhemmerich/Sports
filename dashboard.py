@@ -302,7 +302,7 @@ def api_pnl_debug():
 def api_pnl_history():
     from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT
 
-    # ── Try settled-bet cumulative PnL first ──────────────────────────────────
+    # ── Try settled-bet cumulative PnL first (one point per trade) ───────────
     def _row_pnl(row):
         result = str(row["result"]).strip().upper()
         amt = float(row.get("entered_$", 0) or 0)
@@ -313,22 +313,14 @@ def api_pnl_history():
             return -amt
         return 0.0
 
-    def _cum_series(daily_dict, all_dates):
-        running = 0.0
-        out = []
-        for d in all_dates:
-            running += daily_dict.get(d, 0.0)
-            out.append(round(running, 2))
-        return out
-
-    settled_daily: dict[str, float] = {}
-    group_daily: dict[str, dict[str, dict[str, float]]] = {"book": {}, "market": {}}
     group_labels: dict[str, list[str]] = {"book": [], "market": []}
+    # per-trade data: list of (date_label, pnl, book_key, market_key)
+    trades: list[tuple[str, float, str, str]] = []
 
     if TRACKER_PATH.exists():
         try:
             df = pd.read_csv(TRACKER_PATH)
-            # Collect labels from ALL rows (placed + settled) for the dropdown
+            # Labels from ALL rows for the dropdown
             for col, gk in [("bookmaker", "book"), ("market", "market")]:
                 if col in df.columns:
                     vals = df[col].dropna().astype(str).str.strip().str.lower()
@@ -337,40 +329,48 @@ def api_pnl_history():
                     vals = vals[vals.str.len() > 0]
                     vals = vals[vals != "nan"]
                     group_labels[gk] = sorted(vals.unique().tolist())
-            # Compute P&L only from settled rows
+            # One data point per settled trade, in CSV order (chronological)
             settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
             settled["date"] = settled["date"].astype(str).str.strip()
+            day_count: dict[str, int] = {}
             for _, row in settled.iterrows():
                 d = str(row["date"])
+                day_count[d] = day_count.get(d, 0) + 1
+                label = d if day_count[d] == 1 else f"{d} #{day_count[d]}"
                 pnl = _row_pnl(row)
-                settled_daily[d] = settled_daily.get(d, 0.0) + pnl
-                for gk, col in [("book", "bookmaker"), ("market", "market")]:
-                    key = str(row.get(col, "unknown") or "unknown").strip().lower()
-                    if gk == "market":
-                        key = key.replace("player_", "", 1) if key.startswith("player_") else key
-                    if not key or key == "nan":
-                        key = "unknown"
-                    if key not in group_daily[gk]:
-                        group_daily[gk][key] = {}
-                    group_daily[gk][key][d] = group_daily[gk][key].get(d, 0.0) + pnl
+                bk = str(row.get("bookmaker", "unknown") or "unknown").strip().lower()
+                mk = str(row.get("market", "unknown") or "unknown").strip().lower()
+                mk = mk.replace("player_", "", 1) if mk.startswith("player_") else mk
+                if not bk or bk == "nan": bk = "unknown"
+                if not mk or mk == "nan": mk = "unknown"
+                trades.append((label, pnl, bk, mk))
         except Exception:
-            pass
+            import traceback; traceback.print_exc()
 
-    def _build_groups(all_dates):
-        g = {}
+    if trades:
+        labels = [t[0] for t in trades]
+        # cumulative all-trades
+        running = 0.0
+        values = []
+        for _, pnl, _, _ in trades:
+            running += pnl
+            values.append(round(running, 2))
+        # per-group cumulative series (same length, 0 for trades not in group)
+        def _group_series(gk, name):
+            r = 0.0
+            out = []
+            for _, pnl, bk, mk in trades:
+                key = bk if gk == "book" else mk
+                if key == name:
+                    r += pnl
+                out.append(round(r, 2))
+            return out
+
+        groups: dict = {}
         for gk in ("book", "market"):
-            # include all known labels; groups with no settled data get zero series
-            g[gk] = {}
-            for name in group_labels[gk]:
-                daily = group_daily[gk].get(name, {})
-                g[gk][name] = _cum_series(daily, all_dates)
-        return g
+            groups[gk] = {name: _group_series(gk, name) for name in group_labels[gk]}
 
-    if settled_daily:
-        all_dates = sorted(settled_daily.keys())
-        values = _cum_series(settled_daily, all_dates)
-        return jsonify({"dates": all_dates, "values": values, "mode": "pnl",
-                        "groups": _build_groups(all_dates)})
+        return jsonify({"dates": labels, "values": values, "mode": "pnl", "groups": groups})
 
     # ── Fall back to balance log (shows total balance over time) ──────────────
     if BALANCE_LOG_PATH.exists():
@@ -381,11 +381,7 @@ def api_pnl_history():
                 dates = bl["date"].astype(str).tolist()
                 deposit = DEPOSIT or float(bl["balance"].iloc[0])
                 values = [round(float(b) - deposit, 2) for b in bl["balance"]]
-                # Use settled-bet date axis for group series (may differ from balance dates)
-                grp_dates = sorted(settled_daily.keys()) if settled_daily else dates
-                return jsonify({"dates": dates, "values": values, "mode": "balance",
-                                "groups": _build_groups(grp_dates),
-                                "group_dates": grp_dates})
+                return jsonify({"dates": dates, "values": values, "mode": "balance", "groups": {}})
         except Exception:
             pass
 
