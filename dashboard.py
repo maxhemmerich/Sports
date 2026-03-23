@@ -563,10 +563,9 @@ h1{font-size:1.15rem;color:var(--green)}
 /* sections */
 section{background:var(--card);border:1px solid var(--border);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
 .sec-hdr{padding:10px 14px;border-bottom:1px solid var(--border);font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);display:flex;align-items:center;justify-content:space-between}
-.bet-row{padding:11px 14px;border-bottom:1px solid var(--border)}
-.bet-row:last-child{border-bottom:none}
-.bet-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:5px}
-.player{font-weight:600;font-size:.92rem}
+.pot-tile-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;padding:10px 14px}
+.pot-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px 12px;display:flex;flex-direction:column;gap:5px}
+.player{font-weight:600;font-size:.88rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .edge{font-size:.68rem;background:rgba(63,185,80,.15);color:var(--green);border-radius:4px;padding:2px 6px}
 .game-label{font-size:.72rem;color:var(--muted)}
 .bet-meta{font-size:.78rem;color:var(--muted);margin-bottom:6px}
@@ -753,22 +752,19 @@ function render(d) {
   if (!pot.length) {
     pl.innerHTML = '<div class="empty">No bets available right now</div>';
   } else {
-    pl.innerHTML = pot.map(b => {
+    pl.innerHTML = '<div class="pot-tile-grid">' + pot.map(b => {
       const sid = safeId(b.key);
       const keyAttr = JSON.stringify(b.key).replace(/"/g, '&quot;');
       const sideClass = b.side === 'OVER' ? 'over' : 'under';
-      return `<div class="bet-row">
-        <div class="bet-top">
+      return `<div class="pot-tile">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
           <span class="player">${b.player}</span>
           <span class="edge">${b.edge_pct}% edge</span>
-          <span class="game-label">${b.game}</span>
         </div>
-        <div class="bet-meta">
-          ${b.market} &nbsp;·&nbsp;
-          <span class="${sideClass}">${b.side} ${b.line}</span>
-          &nbsp;·&nbsp; ${fmtOdds(b.odds)}
-          &nbsp;·&nbsp; ${cap(b.bookmaker)}
-          &nbsp;·&nbsp; pred: ${b.prediction}
+        <div class="tile-meta">
+          ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
+          ${cap(b.bookmaker)} · pred: ${b.prediction}<br>
+          <span style="color:var(--muted);font-size:.67rem">${b.game}</span>
         </div>
         <div class="actions">
           $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
@@ -776,7 +772,7 @@ function render(d) {
           <button class="btn-skip" onclick="skipBet(${keyAttr})">Skip</button>
         </div>
       </div>`;
-    }).join('');
+    }).join('') + '</div>';
   }
 
   // Open bets — tiles grouped by book
