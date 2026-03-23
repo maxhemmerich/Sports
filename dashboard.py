@@ -598,9 +598,6 @@ button:active{opacity:.7}
 .btn-push{background:var(--yellow);color:#000}
 .btn-blue{background:var(--blue);color:#000}
 .empty{padding:20px 14px;color:var(--muted);font-size:.82rem;text-align:center}
-/* chart toggles */
-.chart-tog{font-size:.68rem;padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer}
-.chart-tog.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* open bets tiles */
 .open-books{display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;align-items:flex-start}
 .open-book-col{flex:1;min-width:300px}
@@ -639,12 +636,10 @@ button:active{opacity:.7}
   <div class="sec-hdr">
     <span id="chart-title">Cumulative P&amp;L</span>
     <span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span>
-    <div style="display:flex;gap:4px;margin-left:auto;align-items:center">
-      <div id="chart-toggles" style="display:flex;gap:3px">
-        <button class="chart-tog active" onclick="setChartGroup('all')">All</button>
-        <button class="chart-tog" onclick="setChartGroup('book')">By Book</button>
-        <button class="chart-tog" onclick="setChartGroup('market')">By Market</button>
-      </div>
+    <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
+      <select id="chart-filter" onchange="setChartGroup(this.value)" style="font-size:.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--fg);cursor:pointer">
+        <option value="all">All trades</option>
+      </select>
       <button onclick="showAdjModal()" style="font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">+ Adjustment</button>
     </div>
   </div>
@@ -932,15 +927,36 @@ async function refreshLines() {
 let _chartDates = [], _chartValues = [];
 let _tradeLabels = [], _tradePnl = [];
 let _chartMode = 'empty';
-let _chartGroups = {};   // { book: {name: [values]}, market: {name: [values]} }
-let _chartGroup = 'all'; // 'all' | 'book' | 'market'
+let _chartGroups = {};    // { book: {name: [values]}, market: {name: [values]} }
+let _chartFilter = 'all'; // 'all' | 'book:fanduel' | 'market:points' etc.
 
-const GROUP_COLORS = ['#58a6ff','#f0883e','#bc8cff','#3fb950','#ff7b72','#ffa657','#79c0ff','#d2a8ff'];
-
-function setChartGroup(g) {
-  _chartGroup = g;
-  document.querySelectorAll('.chart-tog').forEach(b => b.classList.toggle('active', b.getAttribute('onclick').includes("'" + g + "'")));
+function setChartGroup(val) {
+  _chartFilter = val;
   drawChart();
+}
+
+function _populateChartDropdown() {
+  const sel = $('chart-filter');
+  if (!sel) return;
+  // preserve current selection if still valid
+  const prev = sel.value;
+  sel.innerHTML = '<option value="all">All trades</option>';
+  const labels = {book: 'Sportsbook', market: 'Market'};
+  for (const [gk, gname] of Object.entries(labels)) {
+    const entries = Object.keys(_chartGroups[gk] || {});
+    if (!entries.length) continue;
+    const og = document.createElement('optgroup');
+    og.label = gname;
+    entries.sort().forEach(name => {
+      const opt = document.createElement('option');
+      opt.value = gk + ':' + name;
+      opt.textContent = name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g,' ');
+      og.appendChild(opt);
+    });
+    sel.appendChild(og);
+  }
+  sel.value = prev in [...sel.options].map(o=>o.value) ? prev : 'all';
+  _chartFilter = sel.value;
 }
 
 function showAdjModal() {
@@ -965,6 +981,7 @@ async function loadChart() {
     _chartValues = d.values || [];
     _chartMode = d.mode || 'empty';
     _chartGroups = d.groups || {};
+    _populateChartDropdown();
     const title = $('chart-title');
     if (title) title.textContent = _chartMode === 'balance' ? 'Balance vs Deposit' : 'Cumulative P&L';
     drawChart();
@@ -1008,15 +1025,16 @@ function drawChart() {
   const gainVal = lastVal + toGain;
   const lossVal = forkBase;
 
-  // multi-series data (by book or market)
-  const isGrouped = _chartGroup !== 'all' && _chartGroups[_chartGroup] && Object.keys(_chartGroups[_chartGroup]).length > 0;
-  const groupEntries = isGrouped
-    ? Object.entries(_chartGroups[_chartGroup]).map(([name, vals], ci) => ({
-        name, vals: vals.map(v => v + deposit), color: GROUP_COLORS[ci % GROUP_COLORS.length]
-      }))
-    : [];
+  // filtered single series (book:fanduel or market:points)
+  let filteredVals = null;
+  if (_chartFilter !== 'all') {
+    const [gk, ...rest] = _chartFilter.split(':');
+    const name = rest.join(':');
+    const raw = (_chartGroups[gk] || {})[name];
+    if (raw) filteredVals = raw.map(v => v + deposit);
+  }
 
-  const hasFork = !isGrouped && (toGain > 0 || toLose > 0);
+  const hasFork = !filteredVals && (toGain > 0 || toLose > 0);
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
   const ch = H - pad.top  - pad.bottom;
@@ -1026,9 +1044,8 @@ function drawChart() {
   const toX = i => pad.left + (n <= 1 ? 0 : (i / (n - 1)) * histW);
   const forkTipX = pad.left + cw;
 
-  const allVals = hasFork
-    ? [...chartVals, forkBase, gainVal, lossVal]
-    : isGrouped ? [deposit, ...groupEntries.flatMap(g => g.vals)] : chartVals;
+  const displayVals = filteredVals || chartVals;
+  const allVals = hasFork ? [...displayVals, forkBase, gainVal, lossVal] : displayVals;
   const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
   const range = max - min || 1;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
@@ -1053,47 +1070,30 @@ function drawChart() {
     ctx.fillText('$' + t.toFixed(0), pad.left - 6, y + 3);
   });
 
-  if (isGrouped) {
-    // multi-line: one line per group, no fill
-    groupEntries.forEach(({vals, color}) => {
-      ctx.beginPath();
-      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round';
-      ctx.setLineDash([]);
-      vals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
-      ctx.stroke();
-    });
-    // update legend
-    const leg = $('chart-legend');
-    if (leg) leg.innerHTML = groupEntries.map(({name, color}) =>
-      `<span style="display:flex;align-items:center;gap:4px;color:var(--fg)">` +
-      `<span style="width:14px;height:3px;background:${color};border-radius:2px;display:inline-block"></span>${name}</span>`
-    ).join('');
-  } else {
-    // single line with fill
-    const leg = $('chart-legend');
-    if (leg) leg.innerHTML = '';
-    const lineColor = lastVal >= deposit ? '#3fb950' : '#f85149';
+  {
+    const vals = displayVals;
+    const tip = vals[n - 1];
+    const lineColor = tip >= deposit ? '#3fb950' : '#f85149';
     const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-    grad.addColorStop(0, lastVal >= deposit ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
+    grad.addColorStop(0, tip >= deposit ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
     grad.addColorStop(1, 'rgba(0,0,0,0)');
     ctx.beginPath();
     ctx.moveTo(toX(0), zero);
-    chartVals.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
+    vals.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
     ctx.lineTo(toX(n - 1), zero);
     ctx.closePath();
     ctx.fillStyle = grad; ctx.fill();
-
     ctx.beginPath();
     ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
     ctx.setLineDash([]);
-    chartVals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+    vals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
     ctx.stroke();
   }
 
   if (hasFork) {
     const forkX   = toX(n - 1);
     const tipX    = forkTipX;
-    const originY = toY(lastVal);    // fork vertex at history line end
+    const originY = toY(displayVals[n - 1]);    // fork vertex at history line end
     const gainY   = toY(gainVal);
     const lossY   = toY(lossVal);
 
