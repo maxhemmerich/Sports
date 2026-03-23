@@ -41,7 +41,7 @@ def _american_to_decimal(odds: float) -> float:
 
 def _build_state() -> dict:
     from screener import (  # lazy — avoids circular import at module load
-        TRACKER_PATH, DEFAULT_BOOKS, DEPOSIT,
+        TRACKER_PATH, DEFAULT_BOOKS, DEPOSIT, ADJUSTMENTS_PATH,
         _at_risk_per_book,
         _bet_key, _position,
     )
@@ -150,12 +150,13 @@ def _build_state() -> dict:
     trade_labels: list[str] = []
     trade_pnl: list[float] = []
     try:
+        # collect per-trade events
+        _events: list[tuple[str, float, str]] = []  # (date, pnl, label)
         if TRACKER_PATH.exists():
             _tr = pd.read_csv(TRACKER_PATH)
             _settled = _tr[_tr["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
             _settled = _settled.sort_values("date", kind="stable")
             _today = date.today().isoformat()
-            _daily: dict[str, float] = {}
             for _, _r in _settled.iterrows():
                 _res = str(_r.get("result", "")).strip().upper()
                 _amt = _sf(_r.get("entered_$", 0))
@@ -167,20 +168,29 @@ def _build_state() -> dict:
                     _profit = -_amt
                 else:
                     _profit = 0.0
-                _daily[_d] = _daily.get(_d, 0.0) + _profit
                 overall_pnl += _profit
                 if _d == _today:
                     today_pnl += _profit
                 _mkt = str(_r.get("market", "")).replace("player_", "")
                 _lbl = f"{_r.get('player', '')} {_mkt} {_r.get('side', '')} {_r.get('line', '')}".strip()
-                trade_labels.append(_lbl)
-                trade_pnl.append(round(_profit, 2))
-            if _daily:
-                _running = 0.0
-                for _d, _v in sorted(_daily.items()):
-                    _running += _v
-                    chart_dates.append(_d)
-                    chart_values.append(round(_running, 2))
+                _events.append((_d, round(_profit, 2), _lbl))
+        # merge manual adjustments
+        if ADJUSTMENTS_PATH.exists():
+            _adj = pd.read_csv(ADJUSTMENTS_PATH)
+            for _, _r in _adj.iterrows():
+                _d = str(_r.get("date", "")).strip()
+                _amt = float(_r.get("amount", 0) or 0)
+                _note = str(_r.get("note", "Adjustment")).strip() or "Adjustment"
+                _events.append((_d, round(_amt, 2), _note))
+        # sort by date and build cumulative series
+        _events.sort(key=lambda e: e[0])
+        _running = 0.0
+        for _d, _v, _lbl in _events:
+            _running += _v
+            chart_dates.append(_d)
+            chart_values.append(round(_running, 2))
+            trade_labels.append(_lbl)
+            trade_pnl.append(_v)
     except Exception:
         pass
 
@@ -451,6 +461,24 @@ def api_balances():
     return jsonify({"ok": True})
 
 
+@app.route("/api/adjustment", methods=["POST"])
+def api_adjustment():
+    from screener import ADJUSTMENTS_PATH
+    body = request.json or {}
+    try:
+        amount = float(body.get("amount", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid amount"}), 400
+    note = str(body.get("note", "")).strip() or "Adjustment"
+    d = date.today().isoformat()
+    row = pd.DataFrame([{"date": d, "amount": round(amount, 2), "note": note}])
+    if ADJUSTMENTS_PATH.exists():
+        row = pd.concat([pd.read_csv(ADJUSTMENTS_PATH), row], ignore_index=True)
+    row.to_csv(ADJUSTMENTS_PATH, index=False)
+    broadcast_state()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/config", methods=["POST"])
 def api_config():
     body = request.json or {}
@@ -589,9 +617,23 @@ button:active{opacity:.7}
 <div class="books-row" id="books-row"></div>
 
 <section id="chart-section">
-  <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span><button id="chart-toggle-btn" onclick="toggleChartView()" style="margin-left:auto;font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">Per Trade</button></div>
+  <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span><button onclick="showAdjModal()" style="margin-left:auto;font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">+ Adjustment</button></div>
   <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:160px"></canvas></div>
 </section>
+
+<div id="adj-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:20px;width:280px;max-width:90vw">
+    <div style="font-weight:600;margin-bottom:12px">Log Adjustment</div>
+    <label style="font-size:.75rem;color:var(--muted)">Amount ($, negative for withdrawal)</label>
+    <input id="adj-amount" type="number" step="0.01" placeholder="e.g. 25.00 or -10.00" style="width:100%;margin:4px 0 10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:.88rem">
+    <label style="font-size:.75rem;color:var(--muted)">Note (optional)</label>
+    <input id="adj-note" type="text" placeholder="e.g. Promo bonus" style="width:100%;margin:4px 0 14px;background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:6px 8px;font-size:.88rem">
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button onclick="hideAdjModal()" style="padding:6px 14px;border-radius:4px;border:1px solid var(--border);background:var(--bg);color:var(--muted);cursor:pointer">Cancel</button>
+      <button onclick="submitAdj()" style="padding:6px 14px;border-radius:4px;border:none;background:var(--green);color:#000;font-weight:600;cursor:pointer">Save</button>
+    </div>
+  </div>
+</div>
 
 <section>
   <div class="sec-hdr"><span>Potential Bets</span><span id="pot-count"></span></div>
@@ -639,7 +681,7 @@ fetch('/api/state').then(r => r.json()).then(d => {
     if (d.chart_dates && d.chart_dates.length) {
       _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
       _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || [];
-      const title = $('chart-title'); if (title) title.textContent = _chartView === 'cumulative' ? 'Cumulative P&L' : 'Per Trade P&L';
+      const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
       drawChart();
     }
   }
@@ -661,7 +703,7 @@ es.onmessage = e => {
     _tradePnl = d.trade_pnl || [];
     _chartMode = 'pnl';
     const title = $('chart-title');
-    if (title) title.textContent = _chartView === 'cumulative' ? 'Cumulative P&L' : 'Per Trade P&L';
+    if (title) title.textContent = 'Cumulative P&L';
     drawChart();
   }
 };
@@ -861,17 +903,22 @@ async function refreshLines() {
 // ── P&L Chart ─────────────────────────────────────────────────────────────────
 let _chartDates = [], _chartValues = [];
 let _tradeLabels = [], _tradePnl = [];
-let _chartView = 'cumulative'; // 'cumulative' | 'trades'
 
 let _chartMode = 'empty';
 
-function toggleChartView() {
-  _chartView = _chartView === 'cumulative' ? 'trades' : 'cumulative';
-  const btn = $('chart-toggle-btn');
-  if (btn) btn.textContent = _chartView === 'cumulative' ? 'Per Trade' : 'Cumulative';
-  const title = $('chart-title');
-  if (title) title.textContent = _chartView === 'cumulative' ? 'Cumulative P&L' : 'Per Trade P&L';
-  drawChart();
+function showAdjModal() {
+  const m = $('adj-modal'); if (m) { m.style.display = 'flex'; $('adj-amount').focus(); }
+}
+function hideAdjModal() {
+  const m = $('adj-modal'); if (m) m.style.display = 'none';
+  $('adj-amount').value = ''; $('adj-note').value = '';
+}
+async function submitAdj() {
+  const amount = parseFloat($('adj-amount').value);
+  if (isNaN(amount)) { alert('Enter a valid amount'); return; }
+  const note = $('adj-note').value.trim();
+  await apiFetch('/api/adjustment', {amount, note});
+  hideAdjModal();
 }
 async function loadChart() {
   try {
@@ -891,54 +938,6 @@ function drawChart() {
   sec.style.display = '';
   const canvas = $('pnl-chart');
   if (canvas.offsetWidth === 0) { requestAnimationFrame(drawChart); return; }
-
-  if (_chartView === 'trades') {
-    const dpr = window.devicePixelRatio || 1;
-    const W = canvas.offsetWidth, H = 160;
-    canvas.width = W * dpr; canvas.height = H * dpr;
-    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
-    const ctx = canvas.getContext('2d');
-    ctx.scale(dpr, dpr);
-    if (!_tradePnl.length) {
-      ctx.fillStyle = '#8b949e'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
-      ctx.fillText('No settled trades yet', W / 2, H / 2);
-      $('chart-range').textContent = '';
-      return;
-    }
-    const pad = {top: 12, right: 12, bottom: 28, left: 52};
-    const cw = W - pad.left - pad.right;
-    const ch = H - pad.top - pad.bottom;
-    const n = _tradePnl.length;
-    const maxAbs = Math.max(..._tradePnl.map(Math.abs), 1);
-    const toY = v => pad.top + ch / 2 - (v / maxAbs) * (ch / 2);
-    const zeroY = pad.top + ch / 2;
-    const barW = Math.max(2, Math.floor(cw / n) - 1);
-    // zero line
-    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(pad.left + cw, zeroY); ctx.stroke();
-    // y labels
-    ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-    ctx.fillText('+$' + maxAbs.toFixed(0), pad.left - 4, pad.top + 4);
-    ctx.fillText('-$' + maxAbs.toFixed(0), pad.left - 4, pad.top + ch + 4);
-    ctx.fillText('$0', pad.left - 4, zeroY + 4);
-    // bars
-    _tradePnl.forEach((v, i) => {
-      const x = pad.left + Math.floor(i / n * cw);
-      const y = v >= 0 ? toY(v) : zeroY;
-      const bh = Math.abs(toY(v) - zeroY);
-      ctx.fillStyle = v >= 0 ? '#3fb950' : '#f85149';
-      ctx.fillRect(x, y, barW, Math.max(1, bh));
-    });
-    // x labels: first, middle, last
-    ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-    [[0, _tradeLabels[0]], [Math.floor(n/2), _tradeLabels[Math.floor(n/2)]], [n-1, _tradeLabels[n-1]]].filter(([i,l])=>l).forEach(([i, lbl]) => {
-      const x = pad.left + Math.floor(i / n * cw) + barW / 2;
-      const short = lbl.split(' ').slice(0,2).join(' ');
-      ctx.fillText(short, x, H - 6);
-    });
-    $('chart-range').textContent = n + ' trade' + (n === 1 ? '' : 's');
-    return;
-  }
 
   if (!_chartDates.length) {
     const ctx2 = canvas.getContext('2d');
@@ -1065,7 +1064,7 @@ function drawChart() {
   const showIdx = [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i && _chartDates[v]);
   showIdx.filter(i => !(hasFork && i === n - 1)).forEach(i => ctx.fillText(_chartDates[i].slice(5), toX(i), H - 6));
 
-  $('chart-range').textContent = _chartDates[0] + ' → ' + (hasFork ? 'Today' : _chartDates[n - 1]);
+  $('chart-range').textContent = _chartDates[0] + ' → ' + (hasFork ? 'Today' : _chartDates[n - 1]) + '  (' + n + ' event' + (n === 1 ? '' : 's') + ')';
 }
 
 // Chart updates via SSE state; redraw on resize only

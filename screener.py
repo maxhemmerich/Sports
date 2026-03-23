@@ -46,6 +46,7 @@ RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
 BALANCE_LOG_PATH = RESULTS_DIR / "balance_log.csv"
+ADJUSTMENTS_PATH = RESULTS_DIR / "adjustments.csv"
 DEFAULT_BOOKS = ["draftkings", "fanduel"]
 LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))          # seconds between screener runs
 LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))     # print timestamp every N iterations
