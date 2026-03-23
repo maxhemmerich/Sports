@@ -726,6 +726,7 @@ fetch('/api/state').then(r => r.json()).then(d => {
   if (!d.error) {
     _state = d;
     try { render(d); } catch(err) { console.error('render error:', err); }
+    _populateChartDropdown();
     if (d.chart_dates && d.chart_dates.length) {
       _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
       _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || [];
@@ -743,6 +744,7 @@ es.onmessage = e => {
   if (d.ping || d.error) return;
   _state = d;
   try { render(d); } catch(err) { console.error('render error:', err, d); }
+  _populateChartDropdown();
   // Update chart from SSE state (guaranteed same data as overall_pnl)
   if (d.chart_dates && d.chart_dates.length) {
     _chartDates = d.chart_dates;
@@ -961,16 +963,30 @@ function setChartGroup(val) {
 function _populateChartDropdown() {
   const sel = $('chart-filter');
   if (!sel) return;
-  // preserve current selection if still valid
   const prev = sel.value;
+
+  // Collect labels from settled groups AND from all bets in _state
+  const allBets = [...(_state.open_bets || []), ...(_state.settled_bets || [])];
+  const fromState = {
+    book:   [...new Set(allBets.map(b => (b.bookmaker||'').trim().toLowerCase()).filter(Boolean))],
+    market: [...new Set(allBets.map(b => (b.market||'').trim().toLowerCase()).filter(Boolean))]
+  };
+  const fromGroups = {
+    book:   Object.keys(_chartGroups.book   || {}),
+    market: Object.keys(_chartGroups.market || {})
+  };
+  const merged = {
+    book:   [...new Set([...fromState.book,   ...fromGroups.book  ])].sort(),
+    market: [...new Set([...fromState.market, ...fromGroups.market])].sort()
+  };
+
   sel.innerHTML = '<option value="all">All trades</option>';
   const labels = {book: 'Sportsbook', market: 'Market'};
   for (const [gk, gname] of Object.entries(labels)) {
-    const entries = Object.keys(_chartGroups[gk] || {});
-    if (!entries.length) continue;
+    if (!merged[gk].length) continue;
     const og = document.createElement('optgroup');
     og.label = gname;
-    entries.sort().forEach(name => {
+    merged[gk].forEach(name => {
       const opt = document.createElement('option');
       opt.value = gk + ':' + name;
       opt.textContent = name.charAt(0).toUpperCase() + name.slice(1).replace(/_/g,' ');
