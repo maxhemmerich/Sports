@@ -747,15 +747,13 @@ fetch('/api/state').then(r => r.json()).then(d => {
   if (!d.error) {
     _state = d;
     try { render(d); } catch(err) { console.error('render error:', err); }
-    _populateChartDropdown();
     if (d.chart_dates && d.chart_dates.length) {
       _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
       _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || [];
       const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
-      drawChart();
     }
   }
-}).catch(() => {});
+}).catch(() => {}).finally(() => loadChart());
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
@@ -931,7 +929,7 @@ async function skipBet(key) {
 }
 
 async function settle(idx, result) {
-  if (await post('/api/settle', {tracker_idx: idx, result})) await refreshState();
+  if (await post('/api/settle', {tracker_idx: idx, result})) { await refreshState(); await loadChart(); }
 }
 
 async function toggleBook(book, currently_on) {
