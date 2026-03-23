@@ -302,11 +302,19 @@ def api_pnl_history():
 
     settled_daily: dict[str, float] = {}
     group_daily: dict[str, dict[str, dict[str, float]]] = {"book": {}, "market": {}}
+    group_labels: dict[str, list[str]] = {"book": [], "market": []}
 
-    # Always build groups from tracker (used even in balance-log fallback mode)
     if TRACKER_PATH.exists():
         try:
             df = pd.read_csv(TRACKER_PATH)
+            # Collect labels from ALL rows (placed + settled) for the dropdown
+            for col, gk in [("bookmaker", "book"), ("market", "market")]:
+                if col in df.columns:
+                    vals = df[col].dropna().astype(str).str.strip().str.lower()
+                    vals = vals[vals.str.len() > 0]
+                    vals = vals[vals != "nan"]
+                    group_labels[gk] = sorted(vals.unique().tolist())
+            # Compute P&L only from settled rows
             settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
             settled["date"] = settled["date"].astype(str).str.strip()
             for _, row in settled.iterrows():
@@ -325,8 +333,12 @@ def api_pnl_history():
 
     def _build_groups(all_dates):
         g = {}
-        for gk, subdict in group_daily.items():
-            g[gk] = {name: _cum_series(daily, all_dates) for name, daily in subdict.items()}
+        for gk in ("book", "market"):
+            # include all known labels; groups with no settled data get zero series
+            g[gk] = {}
+            for name in group_labels[gk]:
+                daily = group_daily[gk].get(name, {})
+                g[gk][name] = _cum_series(daily, all_dates)
         return g
 
     if settled_daily:
@@ -344,9 +356,11 @@ def api_pnl_history():
                 dates = bl["date"].astype(str).tolist()
                 deposit = DEPOSIT or float(bl["balance"].iloc[0])
                 values = [round(float(b) - deposit, 2) for b in bl["balance"]]
-                # groups are keyed to settled-bet dates; align to balance dates
+                # Use settled-bet date axis for group series (may differ from balance dates)
+                grp_dates = sorted(settled_daily.keys()) if settled_daily else dates
                 return jsonify({"dates": dates, "values": values, "mode": "balance",
-                                "groups": _build_groups(dates)})
+                                "groups": _build_groups(grp_dates),
+                                "group_dates": grp_dates})
         except Exception:
             pass
 
@@ -936,6 +950,7 @@ let _chartDates = [], _chartValues = [];
 let _tradeLabels = [], _tradePnl = [];
 let _chartMode = 'empty';
 let _chartGroups = {};    // { book: {name: [values]}, market: {name: [values]} }
+let _chartGroupDates = []; // date axis for group series (may differ from main dates)
 let _chartFilter = 'all'; // 'all' | 'book:fanduel' | 'market:points' etc.
 
 function setChartGroup(val) {
@@ -990,6 +1005,7 @@ async function loadChart() {
     _chartValues = d.values || [];
     _chartMode = d.mode || 'empty';
     _chartGroups = d.groups || {};
+    _chartGroupDates = d.group_dates || d.dates || [];
     _populateChartDropdown();
     const title = $('chart-title');
     if (title) title.textContent = _chartMode === 'balance' ? 'Balance vs Deposit' : 'Cumulative P&L';
@@ -1024,7 +1040,7 @@ function drawChart() {
   const toGain = (_state.to_gain || 0);
   const toLose = (_state.to_lose || 0);
   const deposit = _state.deposit || 0;
-  const n = _chartValues.length;
+  const n = _chartValues.length; // always use main series length for layout
   // offset all historical values by deposit so chart starts at deposit level
   const chartVals = _chartValues.map(v => v + deposit);
   const lastVal = chartVals[n - 1];
@@ -1036,13 +1052,18 @@ function drawChart() {
 
   // filtered single series (book:fanduel or market:points)
   let filteredVals = null;
+  let filteredDates = null;
   if (_chartFilter !== 'all') {
     const [gk, ...rest] = _chartFilter.split(':');
     const name = rest.join(':');
     const raw = (_chartGroups[gk] || {})[name];
-    if (raw) filteredVals = raw.map(v => v + deposit);
+    if (raw) {
+      filteredVals = raw.map(v => v + deposit);
+      filteredDates = _chartGroupDates;
+    }
   }
 
+  const activeDates = filteredDates || _chartDates;
   const hasFork = !filteredVals && (toGain > 0 || toLose > 0);
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
@@ -1050,7 +1071,7 @@ function drawChart() {
 
   // history fills 82% of width; fork gets 18% — fixed regardless of trade count
   const histW = hasFork ? cw * 0.82 : cw;
-  const toX = i => pad.left + (n <= 1 ? 0 : (i / (n - 1)) * histW);
+  const toX = i => { const len = displayVals ? displayVals.length : n; return pad.left + (len <= 1 ? 0 : (i / (len - 1)) * histW); };
   const forkTipX = pad.left + cw;
 
   const displayVals = filteredVals || chartVals;
@@ -1143,11 +1164,12 @@ function drawChart() {
   }
 
   // x-axis labels (first, mid, last historical — skip last when fork replaces it)
+  const dn = displayVals.length;
   ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
-  const showIdx = [0, Math.floor((n - 1) / 2), n - 1].filter((v, i, a) => a.indexOf(v) === i && _chartDates[v]);
-  showIdx.filter(i => !(hasFork && i === n - 1)).forEach(i => ctx.fillText(_chartDates[i].slice(5), toX(i), H - 6));
+  const showIdx = [0, Math.floor((dn - 1) / 2), dn - 1].filter((v, i, a) => a.indexOf(v) === i && activeDates[v]);
+  showIdx.filter(i => !(hasFork && i === dn - 1)).forEach(i => ctx.fillText(activeDates[i].slice(5), toX(i), H - 6));
 
-  $('chart-range').textContent = _chartDates[0] + ' → ' + (hasFork ? 'Today' : _chartDates[n - 1]) + '  (' + n + ' event' + (n === 1 ? '' : 's') + ')';
+  $('chart-range').textContent = (activeDates[0] || '') + ' → ' + (hasFork ? 'Today' : (activeDates[dn - 1] || '')) + '  (' + dn + ' event' + (dn === 1 ? '' : 's') + ')';
 }
 
 // Chart updates via SSE state; redraw on resize only
