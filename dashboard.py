@@ -861,28 +861,33 @@ const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
 
 // ── Book filters for Potential / Open bets ────────────────────────────────────
-let _potBook = 'all', _openBook = 'all';
+let _potBooks = new Set(), _openBooks = new Set();  // empty = show all
 
-function _renderBookFilters(containerId, books, current, setter) {
+function _renderBookFilters(containerId, books, selected, toggler) {
   const el = $(containerId);
   if (!el) return;
-  const all = ['all', ...books.sort()];
-  el.innerHTML = all.map(b =>
-    `<button class="chart-tog${b === current ? ' active' : ''}" onclick="${setter}('${b}')">${b === 'all' ? 'All' : cap(b)}</button>`
+  el.innerHTML = books.sort().map(b =>
+    `<button class="chart-tog${selected.has(b) ? ' active' : ''}" onclick="${toggler}('${b}')">${cap(b)}</button>`
   ).join('');
 }
 
-function setPotBook(b) { _potBook = b; renderPot(); }
-function setOpenBook(b) { _openBook = b; renderOpen(); }
+function togglePotBook(b) {
+  if (_potBooks.has(b)) _potBooks.delete(b); else _potBooks.add(b);
+  renderPot();
+}
+function toggleOpenBook(b) {
+  if (_openBooks.has(b)) _openBooks.delete(b); else _openBooks.add(b);
+  renderOpen();
+}
 
 let _lastD = {};
 function renderPot() {
   const d = _lastD;
   const pot = (d.potential_bets || []).filter(b => !b.skipped && !b.placed);
   const books = [...new Set(pot.map(b => (b.bookmaker||'').toLowerCase()).filter(Boolean))];
-  _renderBookFilters('pot-book-filters', books, _potBook, 'setPotBook');
-  const filtered = _potBook === 'all' ? pot : pot.filter(b => (b.bookmaker||'').toLowerCase() === _potBook);
-  $('pot-count').textContent = `${filtered.length}${_potBook !== 'all' ? '/' + pot.length : ''} available`;
+  _renderBookFilters('pot-book-filters', books, _potBooks, 'togglePotBook');
+  const filtered = _potBooks.size === 0 ? pot : pot.filter(b => _potBooks.has((b.bookmaker||'').toLowerCase()));
+  $('pot-count').textContent = `${filtered.length}${_potBooks.size ? '/' + pot.length : ''} available`;
   const pl = $('pot-list');
   if (!filtered.length) { pl.innerHTML = '<div class="empty">No bets available right now</div>'; return; }
   pl.innerHTML = '<div class="pot-tile-grid">' + filtered.map(b => {
@@ -912,9 +917,9 @@ function renderOpen() {
   const d = _lastD;
   const open = d.open_bets || [];
   const books = [...new Set(open.map(b => (b.bookmaker||'').toLowerCase()).filter(Boolean))];
-  _renderBookFilters('open-book-filters', books, _openBook, 'setOpenBook');
-  const filtered = _openBook === 'all' ? open : open.filter(b => (b.bookmaker||'').toLowerCase() === _openBook);
-  $('open-count').textContent = `${filtered.length}${_openBook !== 'all' ? '/' + open.length : ''} pending`;
+  _renderBookFilters('open-book-filters', books, _openBooks, 'toggleOpenBook');
+  const filtered = _openBooks.size === 0 ? open : open.filter(b => _openBooks.has((b.bookmaker||'').toLowerCase()));
+  $('open-count').textContent = `${filtered.length}${_openBooks.size ? '/' + open.length : ''} pending`;
   const ol = $('open-list');
   if (!filtered.length) { ol.innerHTML = '<div class="empty">No open bets</div>'; return; }
   const byBook = {};
