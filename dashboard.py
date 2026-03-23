@@ -618,7 +618,7 @@ button:active{opacity:.7}
 
 <section id="chart-section">
   <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span><button onclick="showAdjModal()" style="margin-left:auto;font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">+ Adjustment</button></div>
-  <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:160px"></canvas></div>
+  <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:260px"></canvas></div>
 </section>
 
 <div id="adj-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center">
@@ -941,7 +941,7 @@ function drawChart() {
 
   if (!_chartDates.length) {
     const ctx2 = canvas.getContext('2d');
-    canvas.width = canvas.offsetWidth || 800; canvas.height = 80;
+    canvas.width = canvas.offsetWidth || 800; canvas.height = 120;
     ctx2.clearRect(0,0,canvas.width,canvas.height);
     ctx2.fillStyle='#8b949e'; ctx2.font='13px sans-serif'; ctx2.textAlign='center';
     ctx2.fillText('No data yet — chart appears after first screener tick', canvas.width/2, 44);
@@ -949,7 +949,7 @@ function drawChart() {
     return;
   }
   const dpr = window.devicePixelRatio || 1;
-  const W = canvas.offsetWidth || 800, H = 160;
+  const W = canvas.offsetWidth || 800, H = 260;
   canvas.width  = W * dpr;
   canvas.height = H * dpr;
   canvas.style.width  = W + 'px';
@@ -985,19 +985,24 @@ function drawChart() {
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
   const zero = toY(deposit);
 
-  // grid lines
-  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
-  for (let t of [min, deposit, max]) {
-    if (t === min && t === max) continue;
-    const y = toY(t);
-    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
-  }
+  // compute ~5 nicely-rounded grid ticks spanning [min, max]
+  const tickCount = 5;
+  const rawStep = (max - min) / tickCount;
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep || 1)));
+  const step = Math.ceil(rawStep / mag) * mag || 1;
+  const tickStart = Math.floor(min / step) * step;
+  const ticks = [];
+  for (let t = tickStart; t <= max + step * 0.01; t += step) ticks.push(parseFloat(t.toFixed(10)));
 
-  // y-axis labels
+  // grid lines + y-axis labels
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
   ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
-  ctx.fillText('$' + deposit.toFixed(0), pad.left - 4, zero + 3);
-  if (min < deposit)  ctx.fillText('$' + min.toFixed(0),  pad.left - 4, toY(min) + 3);
-  if (max > deposit)  ctx.fillText('$' + max.toFixed(0), pad.left - 4, toY(max) + 3);
+  ticks.forEach(t => {
+    const y = toY(t);
+    if (y < pad.top - 2 || y > pad.top + ch + 2) return;
+    ctx.beginPath(); ctx.moveTo(pad.left - 4, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
+    ctx.fillText('$' + t.toFixed(0), pad.left - 6, y + 3);
+  });
 
   // historical fill area (solid history only, not the connector to forkBase)
   const lineColor = lastVal >= deposit ? '#3fb950' : '#f85149';
