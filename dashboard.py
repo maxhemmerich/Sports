@@ -147,10 +147,13 @@ def _build_state() -> dict:
     overall_pnl = 0.0
     chart_dates: list[str] = []
     chart_values: list[float] = []
+    trade_labels: list[str] = []
+    trade_pnl: list[float] = []
     try:
         if TRACKER_PATH.exists():
             _tr = pd.read_csv(TRACKER_PATH)
             _settled = _tr[_tr["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
+            _settled = _settled.sort_values("date", kind="stable")
             _today = date.today().isoformat()
             _daily: dict[str, float] = {}
             for _, _r in _settled.iterrows():
@@ -168,6 +171,10 @@ def _build_state() -> dict:
                 overall_pnl += _profit
                 if _d == _today:
                     today_pnl += _profit
+                _mkt = str(_r.get("market", "")).replace("player_", "")
+                _lbl = f"{_r.get('player', '')} {_mkt} {_r.get('side', '')} {_r.get('line', '')}".strip()
+                trade_labels.append(_lbl)
+                trade_pnl.append(round(_profit, 2))
             if _daily:
                 _running = 0.0
                 for _d, _v in sorted(_daily.items()):
@@ -193,6 +200,8 @@ def _build_state() -> dict:
         "config": cfg,
         "chart_dates": chart_dates,
         "chart_values": chart_values,
+        "trade_labels": trade_labels,
+        "trade_pnl": trade_pnl,
     }
 
 
@@ -580,7 +589,7 @@ button:active{opacity:.7}
 <div class="books-row" id="books-row"></div>
 
 <section id="chart-section">
-  <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span></div>
+  <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span><button id="chart-toggle-btn" onclick="toggleChartView()" style="margin-left:auto;font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">Per Trade</button></div>
   <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:160px"></canvas></div>
 </section>
 
@@ -629,7 +638,8 @@ fetch('/api/state').then(r => r.json()).then(d => {
     try { render(d); } catch(err) { console.error('render error:', err); }
     if (d.chart_dates && d.chart_dates.length) {
       _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
-      const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
+      _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || [];
+      const title = $('chart-title'); if (title) title.textContent = _chartView === 'cumulative' ? 'Cumulative P&L' : 'Per Trade P&L';
       drawChart();
     }
   }
@@ -647,9 +657,11 @@ es.onmessage = e => {
   if (d.chart_dates && d.chart_dates.length) {
     _chartDates = d.chart_dates;
     _chartValues = d.chart_values;
+    _tradeLabels = d.trade_labels || [];
+    _tradePnl = d.trade_pnl || [];
     _chartMode = 'pnl';
     const title = $('chart-title');
-    if (title) title.textContent = 'Cumulative P&L';
+    if (title) title.textContent = _chartView === 'cumulative' ? 'Cumulative P&L' : 'Per Trade P&L';
     drawChart();
   }
 };
@@ -848,8 +860,19 @@ async function refreshLines() {
 
 // ── P&L Chart ─────────────────────────────────────────────────────────────────
 let _chartDates = [], _chartValues = [];
+let _tradeLabels = [], _tradePnl = [];
+let _chartView = 'cumulative'; // 'cumulative' | 'trades'
 
 let _chartMode = 'empty';
+
+function toggleChartView() {
+  _chartView = _chartView === 'cumulative' ? 'trades' : 'cumulative';
+  const btn = $('chart-toggle-btn');
+  if (btn) btn.textContent = _chartView === 'cumulative' ? 'Per Trade' : 'Cumulative';
+  const title = $('chart-title');
+  if (title) title.textContent = _chartView === 'cumulative' ? 'Cumulative P&L' : 'Per Trade P&L';
+  drawChart();
+}
 async function loadChart() {
   try {
     const r = await fetch('/api/pnl_history');
@@ -868,6 +891,55 @@ function drawChart() {
   sec.style.display = '';
   const canvas = $('pnl-chart');
   if (canvas.offsetWidth === 0) { requestAnimationFrame(drawChart); return; }
+
+  if (_chartView === 'trades') {
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.offsetWidth, H = 160;
+    canvas.width = W * dpr; canvas.height = H * dpr;
+    canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    if (!_tradePnl.length) {
+      ctx.fillStyle = '#8b949e'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('No settled trades yet', W / 2, H / 2);
+      $('chart-range').textContent = '';
+      return;
+    }
+    const pad = {top: 12, right: 12, bottom: 28, left: 52};
+    const cw = W - pad.left - pad.right;
+    const ch = H - pad.top - pad.bottom;
+    const n = _tradePnl.length;
+    const maxAbs = Math.max(..._tradePnl.map(Math.abs), 1);
+    const toY = v => pad.top + ch / 2 - (v / maxAbs) * (ch / 2);
+    const zeroY = pad.top + ch / 2;
+    const barW = Math.max(2, Math.floor(cw / n) - 1);
+    // zero line
+    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.left, zeroY); ctx.lineTo(pad.left + cw, zeroY); ctx.stroke();
+    // y labels
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText('+$' + maxAbs.toFixed(0), pad.left - 4, pad.top + 4);
+    ctx.fillText('-$' + maxAbs.toFixed(0), pad.left - 4, pad.top + ch + 4);
+    ctx.fillText('$0', pad.left - 4, zeroY + 4);
+    // bars
+    _tradePnl.forEach((v, i) => {
+      const x = pad.left + Math.floor(i / n * cw);
+      const y = v >= 0 ? toY(v) : zeroY;
+      const bh = Math.abs(toY(v) - zeroY);
+      ctx.fillStyle = v >= 0 ? '#3fb950' : '#f85149';
+      ctx.fillRect(x, y, barW, Math.max(1, bh));
+    });
+    // x labels: first, middle, last
+    ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+    [[0, _tradeLabels[0]], [Math.floor(n/2), _tradeLabels[Math.floor(n/2)]], [n-1, _tradeLabels[n-1]]].filter(([i,l])=>l).forEach(([i, lbl]) => {
+      const x = pad.left + Math.floor(i / n * cw) + barW / 2;
+      const short = lbl.split(' ').slice(0,2).join(' ');
+      ctx.fillText(short, x, H - 6);
+    });
+    $('chart-range').textContent = n + ' trade' + (n === 1 ? '' : 's');
+    return;
+  }
+
   if (!_chartDates.length) {
     const ctx2 = canvas.getContext('2d');
     canvas.width = canvas.offsetWidth || 800; canvas.height = 80;
