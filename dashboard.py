@@ -970,16 +970,18 @@ function drawChart() {
     ? _state.total_balance : lastVal;
   const gainVal = lastVal + toGain;   // win: recover stake + profit
   const lossVal = forkBase;           // lose: just liquid balance remains
-  const nSlots = n + (hasFork ? 1 : 0);
-
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
   const ch = H - pad.top  - pad.bottom;
 
+  // history fills 82% of width; fork gets 18% — fixed regardless of trade count
+  const histW = hasFork ? cw * 0.82 : cw;
+  const toX = i => pad.left + (n <= 1 ? 0 : (i / (n - 1)) * histW);
+  const forkTipX = pad.left + cw;
+
   const allVals = hasFork ? [...chartVals, forkBase, gainVal, lossVal] : chartVals;
   const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
   const range = max - min || 1;
-  const toX = i => pad.left + (i / Math.max(nSlots - 1, 1)) * cw;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
   const zero = toY(deposit);
 
@@ -1018,7 +1020,7 @@ function drawChart() {
 
   if (hasFork) {
     const forkX   = toX(n - 1);
-    const tipX    = toX(n);
+    const tipX    = forkTipX;
     const originY = toY(lastVal);    // fork vertex at history line end
     const gainY   = toY(gainVal);
     const lossY   = toY(lossVal);
