@@ -277,6 +277,59 @@ def sse():
     return resp
 
 
+@app.route("/api/bet_stats")
+def api_bet_stats():
+    from screener import TRACKER_PATH
+    if not TRACKER_PATH.exists():
+        return jsonify({"rows": []})
+    try:
+        df = pd.read_csv(TRACKER_PATH)
+        settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
+        if settled.empty:
+            return jsonify({"rows": []})
+        def pnl(row):
+            result = str(row["result"]).strip().upper()
+            amt = float(row.get("entered_$", 0) or 0)
+            odds = float(row.get("odds", 0) or 0)
+            if result == "WIN":
+                return amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
+            elif result == "LOSS":
+                return -amt
+            return 0.0
+        settled = settled.copy()
+        settled["_pnl"] = settled.apply(pnl, axis=1)
+        settled["_market"] = settled["market"].astype(str).str.replace(r"^player_", "", regex=True).str.strip().str.lower()
+        settled["_book"] = settled["bookmaker"].astype(str).str.strip().str.lower()
+        out = {}
+        for group_col in ("_book", "_market"):
+            rows = []
+            for key, grp in settled.groupby(group_col):
+                wins   = (grp["result"].str.upper() == "WIN").sum()
+                losses = (grp["result"].str.upper() == "LOSS").sum()
+                pushes = (grp["result"].str.upper() == "PUSH").sum()
+                total  = wins + losses + pushes
+                net    = round(grp["_pnl"].sum(), 2)
+                roi    = round(net / grp["entered_$"].sum() * 100, 1) if grp["entered_$"].sum() else 0
+                rows.append({
+                    "name":    key,
+                    "bets":    int(total),
+                    "wins":    int(wins),
+                    "losses":  int(losses),
+                    "pushes":  int(pushes),
+                    "win_pct": round(wins / (wins + losses) * 100, 1) if (wins + losses) else 0,
+                    "net":     net,
+                    "roi":     roi,
+                    "avg_edge": round(grp["edge_pct"].mean(), 1) if "edge_pct" in grp.columns else None,
+                    "staked":  round(grp["entered_$"].sum(), 2),
+                })
+            rows.sort(key=lambda r: r["net"], reverse=True)
+            out[group_col.lstrip("_")] = rows
+        return jsonify(out)
+    except Exception:
+        import traceback; traceback.print_exc()
+        return jsonify({"rows": []})
+
+
 @app.route("/api/pnl_debug")
 def api_pnl_debug():
     import traceback
@@ -641,6 +694,13 @@ button:active{opacity:.7}
 .btn-push{background:var(--yellow);color:#000}
 .btn-blue{background:var(--blue);color:#000}
 .empty{padding:20px 14px;color:var(--muted);font-size:.82rem;text-align:center}
+/* stats table */
+.stats-tbl{width:100%;border-collapse:collapse;font-size:.78rem}
+.stats-tbl th{text-align:left;padding:6px 14px;color:var(--muted);font-weight:600;font-size:.68rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid var(--border)}
+.stats-tbl td{padding:7px 14px;border-bottom:1px solid var(--border)}
+.stats-tbl tr:last-child td{border-bottom:none}
+.stats-tbl tr:hover td{background:rgba(255,255,255,.03)}
+.stats-win{color:var(--green)}.stats-loss{color:var(--red)}.stats-neu{color:var(--muted)}
 /* open bets tiles */
 .open-books{display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;align-items:flex-start}
 .open-book-col{flex:1;min-width:300px}
@@ -712,6 +772,16 @@ button:active{opacity:.7}
 <section>
   <div class="sec-hdr"><span>Open Bets</span><span id="open-count"></span></div>
   <div id="open-list"><div class="empty">No open bets</div></div>
+</section>
+
+<section id="stats-section">
+  <div class="sec-hdr"><span>Bet Stats</span>
+    <div style="display:flex;gap:4px">
+      <button class="chart-tog active" onclick="setStatsGroup('book')">By Book</button>
+      <button class="chart-tog" onclick="setStatsGroup('market')">By Market</button>
+    </div>
+  </div>
+  <div id="stats-body"><div class="empty">No settled bets yet</div></div>
 </section>
 
 <section>
@@ -929,7 +999,7 @@ async function skipBet(key) {
 }
 
 async function settle(idx, result) {
-  if (await post('/api/settle', {tracker_idx: idx, result})) { await refreshState(); await loadChart(); }
+  if (await post('/api/settle', {tracker_idx: idx, result})) { await refreshState(); await loadChart(); await loadStats(); }
 }
 
 async function toggleBook(book, currently_on) {
@@ -1218,6 +1288,50 @@ function drawChart() {
 
 // Chart updates via SSE state; redraw on resize only
 window.addEventListener('resize', drawChart);
+
+// ── Bet Stats ─────────────────────────────────────────────────────────────────
+let _statsData = {};
+let _statsGroup = 'book';
+
+function setStatsGroup(g) {
+  _statsGroup = g;
+  document.querySelectorAll('#stats-section .chart-tog').forEach(b =>
+    b.classList.toggle('active', b.getAttribute('onclick').includes("'" + g + "'")));
+  renderStats();
+}
+
+function renderStats() {
+  const rows = (_statsData[_statsGroup] || []);
+  const el = $('stats-body');
+  if (!el) return;
+  if (!rows.length) { el.innerHTML = '<div class="empty">No settled bets yet</div>'; return; }
+  const fmtNet = n => `<span class="${n > 0 ? 'stats-win' : n < 0 ? 'stats-loss' : 'stats-neu'}">${n >= 0 ? '+' : ''}$${n.toFixed(2)}</span>`;
+  el.innerHTML = `<table class="stats-tbl"><thead><tr>
+    <th>${_statsGroup === 'book' ? 'Book' : 'Market'}</th>
+    <th>Bets</th><th>W / L / P</th><th>Win %</th>
+    <th>Net P&amp;L</th><th>ROI</th><th>Staked</th>${rows[0].avg_edge != null ? '<th>Avg Edge</th>' : ''}
+  </tr></thead><tbody>` +
+  rows.map(r => `<tr>
+    <td style="font-weight:600;text-transform:capitalize">${r.name.replace(/_/g,' ')}</td>
+    <td>${r.bets}</td>
+    <td><span class="stats-win">${r.wins}W</span> / <span class="stats-loss">${r.losses}L</span>${r.pushes ? ` / <span class="stats-neu">${r.pushes}P</span>` : ''}</td>
+    <td>${r.win_pct}%</td>
+    <td>${fmtNet(r.net)}</td>
+    <td class="${r.roi > 0 ? 'stats-win' : r.roi < 0 ? 'stats-loss' : 'stats-neu'}">${r.roi > 0 ? '+' : ''}${r.roi}%</td>
+    <td>$${r.staked.toFixed(2)}</td>
+    ${r.avg_edge != null ? `<td>${r.avg_edge}%</td>` : ''}
+  </tr>`).join('') + '</tbody></table>';
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/bet_stats');
+    _statsData = await r.json();
+    renderStats();
+  } catch(e) {}
+}
+
+loadStats();
 </script>
 </body>
 </html>"""
