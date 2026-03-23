@@ -765,12 +765,18 @@ button:active{opacity:.7}
 </div>
 
 <section>
-  <div class="sec-hdr"><span>Potential Bets</span><span id="pot-count"></span></div>
+  <div class="sec-hdr">
+    <span>Potential Bets</span><span id="pot-count"></span>
+    <div id="pot-book-filters" style="display:flex;gap:3px;margin-left:auto;flex-wrap:wrap"></div>
+  </div>
   <div id="pot-list"><div class="empty">No bets yet — screener starting...</div></div>
 </section>
 
 <section>
-  <div class="sec-hdr"><span>Open Bets</span><span id="open-count"></span></div>
+  <div class="sec-hdr">
+    <span>Open Bets</span><span id="open-count"></span>
+    <div id="open-book-filters" style="display:flex;gap:3px;margin-left:auto;flex-wrap:wrap"></div>
+  </div>
   <div id="open-list"><div class="empty">No open bets</div></div>
 </section>
 
@@ -854,6 +860,89 @@ const fmtOdds = n => (n > 0 ? '+' : '') + n;
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
 
+// ── Book filters for Potential / Open bets ────────────────────────────────────
+let _potBook = 'all', _openBook = 'all';
+
+function _renderBookFilters(containerId, books, current, setter) {
+  const el = $(containerId);
+  if (!el) return;
+  const all = ['all', ...books.sort()];
+  el.innerHTML = all.map(b =>
+    `<button class="chart-tog${b === current ? ' active' : ''}" onclick="${setter}('${b}')">${b === 'all' ? 'All' : cap(b)}</button>`
+  ).join('');
+}
+
+function setPotBook(b) { _potBook = b; renderPot(); }
+function setOpenBook(b) { _openBook = b; renderOpen(); }
+
+let _lastD = {};
+function renderPot() {
+  const d = _lastD;
+  const pot = (d.potential_bets || []).filter(b => !b.skipped && !b.placed);
+  const books = [...new Set(pot.map(b => (b.bookmaker||'').toLowerCase()).filter(Boolean))];
+  _renderBookFilters('pot-book-filters', books, _potBook, 'setPotBook');
+  const filtered = _potBook === 'all' ? pot : pot.filter(b => (b.bookmaker||'').toLowerCase() === _potBook);
+  $('pot-count').textContent = `${filtered.length}${_potBook !== 'all' ? '/' + pot.length : ''} available`;
+  const pl = $('pot-list');
+  if (!filtered.length) { pl.innerHTML = '<div class="empty">No bets available right now</div>'; return; }
+  pl.innerHTML = '<div class="pot-tile-grid">' + filtered.map(b => {
+    const sid = safeId(b.key);
+    const keyAttr = JSON.stringify(b.key).replace(/"/g, '&quot;');
+    const sideClass = b.side === 'OVER' ? 'over' : 'under';
+    return `<div class="pot-tile">
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+        <span class="player">${b.player}</span>
+        <span class="edge">${b.edge_pct}% edge</span>
+      </div>
+      <div class="tile-meta">
+        ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
+        ${cap(b.bookmaker)} · pred: ${b.prediction}<br>
+        <span style="color:var(--muted);font-size:.67rem">${b.game}</span>
+      </div>
+      <div class="actions">
+        $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
+        <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
+        <button class="btn-skip" onclick="skipBet(${keyAttr})">Skip</button>
+      </div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+function renderOpen() {
+  const d = _lastD;
+  const open = d.open_bets || [];
+  const books = [...new Set(open.map(b => (b.bookmaker||'').toLowerCase()).filter(Boolean))];
+  _renderBookFilters('open-book-filters', books, _openBook, 'setOpenBook');
+  const filtered = _openBook === 'all' ? open : open.filter(b => (b.bookmaker||'').toLowerCase() === _openBook);
+  $('open-count').textContent = `${filtered.length}${_openBook !== 'all' ? '/' + open.length : ''} pending`;
+  const ol = $('open-list');
+  if (!filtered.length) { ol.innerHTML = '<div class="empty">No open bets</div>'; return; }
+  const byBook = {};
+  filtered.forEach(b => { (byBook[b.bookmaker] = byBook[b.bookmaker] || []).push(b); });
+  ol.innerHTML = '<div class="open-books">' +
+    Object.entries(byBook).map(([book, bets]) =>
+      `<div class="open-book-col">
+        <div class="open-book-hdr">${cap(book)} (${bets.length})</div>
+        <div class="open-tile-grid">` +
+        bets.map(b => {
+          const sideClass = b.side === 'OVER' ? 'over' : 'under';
+          return `<div class="open-tile">
+            <div class="tile-player">${b.player}</div>
+            <div class="tile-meta">
+              ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
+              <strong>$${b.entered.toFixed(2)}</strong> → <span class="green">+$${b.to_win.toFixed(2)}</span> · ${b.date}
+            </div>
+            <div class="tile-actions">
+              <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">W</button>
+              <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">L</button>
+              <button class="btn-push" onclick="settle(${b.tracker_idx},'PUSH')">P</button>
+            </div>
+          </div>`;
+        }).join('') +
+        '</div></div>'
+    ).join('') + '</div>';
+}
+
 // ── Render ────────────────────────────────────────────────────────────────────
 function render(d) {
   // Cards
@@ -885,70 +974,11 @@ function render(d) {
     row.appendChild(pill);
   });
 
-  // Potential bets
-  const pot = (d.potential_bets || []).filter(b => !b.skipped && !b.placed);
-  $('pot-count').textContent = `${pot.length} available`;
-  const pl = $('pot-list');
-  if (!pot.length) {
-    pl.innerHTML = '<div class="empty">No bets available right now</div>';
-  } else {
-    pl.innerHTML = '<div class="pot-tile-grid">' + pot.map(b => {
-      const sid = safeId(b.key);
-      const keyAttr = JSON.stringify(b.key).replace(/"/g, '&quot;');
-      const sideClass = b.side === 'OVER' ? 'over' : 'under';
-      return `<div class="pot-tile">
-        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <span class="player">${b.player}</span>
-          <span class="edge">${b.edge_pct}% edge</span>
-        </div>
-        <div class="tile-meta">
-          ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
-          ${cap(b.bookmaker)} · pred: ${b.prediction}<br>
-          <span style="color:var(--muted);font-size:.67rem">${b.game}</span>
-        </div>
-        <div class="actions">
-          $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
-          <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
-          <button class="btn-skip" onclick="skipBet(${keyAttr})">Skip</button>
-        </div>
-      </div>`;
-    }).join('') + '</div>';
-  }
+  // Potential bets + Open bets (delegated to filter-aware renderers)
+  _lastD = d;
+  renderPot();
+  renderOpen();
 
-  // Open bets — tiles grouped by book
-  const open = d.open_bets || [];
-  $('open-count').textContent = `${open.length} pending`;
-  const ol = $('open-list');
-  if (!open.length) {
-    ol.innerHTML = '<div class="empty">No open bets</div>';
-  } else {
-    const byBook = {};
-    open.forEach(b => { (byBook[b.bookmaker] = byBook[b.bookmaker] || []).push(b); });
-    ol.innerHTML = '<div class="open-books">' +
-      Object.entries(byBook).map(([book, bets]) =>
-        `<div class="open-book-col">
-          <div class="open-book-hdr">${cap(book)} (${bets.length})</div>
-          <div class="open-tile-grid">` +
-          bets.map(b => {
-            const sideClass = b.side === 'OVER' ? 'over' : 'under';
-            return `<div class="open-tile">
-              <div class="tile-player">${b.player}</div>
-              <div class="tile-meta">
-                ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
-                <strong>$${b.entered.toFixed(2)}</strong> → <span class="green">+$${b.to_win.toFixed(2)}</span> · ${b.date}
-              </div>
-              <div class="tile-actions">
-                <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">W</button>
-                <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">L</button>
-                <button class="btn-push" onclick="settle(${b.tracker_idx},'PUSH')">P</button>
-              </div>
-            </div>`;
-          }).join('') +
-          '</div>' +
-        '</div>'
-      ).join('') +
-    '</div>';
-  }
 
   // Config
   if (d.config) {
