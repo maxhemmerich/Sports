@@ -303,6 +303,7 @@ def api_pnl_history():
     settled_daily: dict[str, float] = {}
     group_daily: dict[str, dict[str, dict[str, float]]] = {"book": {}, "market": {}}
 
+    # Always build groups from tracker (used even in balance-log fallback mode)
     if TRACKER_PATH.exists():
         try:
             df = pd.read_csv(TRACKER_PATH)
@@ -314,19 +315,25 @@ def api_pnl_history():
                 settled_daily[d] = settled_daily.get(d, 0.0) + pnl
                 for gk, col in [("book", "bookmaker"), ("market", "market")]:
                     key = str(row.get(col, "unknown") or "unknown").strip().lower()
+                    if not key or key == "nan":
+                        key = "unknown"
                     if key not in group_daily[gk]:
                         group_daily[gk][key] = {}
                     group_daily[gk][key][d] = group_daily[gk][key].get(d, 0.0) + pnl
         except Exception:
             pass
 
+    def _build_groups(all_dates):
+        g = {}
+        for gk, subdict in group_daily.items():
+            g[gk] = {name: _cum_series(daily, all_dates) for name, daily in subdict.items()}
+        return g
+
     if settled_daily:
         all_dates = sorted(settled_daily.keys())
         values = _cum_series(settled_daily, all_dates)
-        groups = {}
-        for gk, subdict in group_daily.items():
-            groups[gk] = {name: _cum_series(daily, all_dates) for name, daily in subdict.items()}
-        return jsonify({"dates": all_dates, "values": values, "mode": "pnl", "groups": groups})
+        return jsonify({"dates": all_dates, "values": values, "mode": "pnl",
+                        "groups": _build_groups(all_dates)})
 
     # ── Fall back to balance log (shows total balance over time) ──────────────
     if BALANCE_LOG_PATH.exists():
@@ -335,14 +342,15 @@ def api_pnl_history():
             bl = bl.dropna().sort_values("date")
             if not bl.empty:
                 dates = bl["date"].astype(str).tolist()
-                # Express as profit vs deposit so y-axis matches PnL mode
                 deposit = DEPOSIT or float(bl["balance"].iloc[0])
                 values = [round(float(b) - deposit, 2) for b in bl["balance"]]
-                return jsonify({"dates": dates, "values": values, "mode": "balance"})
+                # groups are keyed to settled-bet dates; align to balance dates
+                return jsonify({"dates": dates, "values": values, "mode": "balance",
+                                "groups": _build_groups(dates)})
         except Exception:
             pass
 
-    return jsonify({"dates": [], "values": [], "mode": "empty"})
+    return jsonify({"dates": [], "values": [], "mode": "empty", "groups": {}})
 
 
 @app.route("/api/place", methods=["POST"])
@@ -955,7 +963,8 @@ function _populateChartDropdown() {
     });
     sel.appendChild(og);
   }
-  sel.value = prev in [...sel.options].map(o=>o.value) ? prev : 'all';
+  const validVals = [...sel.options].map(o => o.value);
+  sel.value = validVals.includes(prev) ? prev : 'all';
   _chartFilter = sel.value;
 }
 
