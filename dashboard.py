@@ -332,6 +332,8 @@ def api_pnl_history():
             for col, gk in [("bookmaker", "book"), ("market", "market")]:
                 if col in df.columns:
                     vals = df[col].dropna().astype(str).str.strip().str.lower()
+                    if gk == "market":
+                        vals = vals.str.replace(r"^player_", "", regex=True)
                     vals = vals[vals.str.len() > 0]
                     vals = vals[vals != "nan"]
                     group_labels[gk] = sorted(vals.unique().tolist())
@@ -344,6 +346,8 @@ def api_pnl_history():
                 settled_daily[d] = settled_daily.get(d, 0.0) + pnl
                 for gk, col in [("book", "bookmaker"), ("market", "market")]:
                     key = str(row.get(col, "unknown") or "unknown").strip().lower()
+                    if gk == "market":
+                        key = key.replace("player_", "", 1) if key.startswith("player_") else key
                     if not key or key == "nan":
                         key = "unknown"
                     if key not in group_daily[gk]:
