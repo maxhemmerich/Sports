@@ -1094,9 +1094,18 @@ function drawChart() {
     const [gk, ...rest] = _chartFilter.split(':');
     const name = rest.join(':');
     const raw = (_chartGroups[gk] || {})[name];
-    if (raw) {
+    if (raw && raw.length) {
       filteredVals = raw.map(v => v + deposit);
       filteredDates = _chartGroupDates;
+    } else {
+      const label = name.replace(/_/g, ' ');
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = '#8b949e'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText('No settled bets for "' + label + '" yet', W / 2, H / 2 - 8);
+      ctx.font = '11px sans-serif';
+      ctx.fillText('P&L will appear here once bets settle', W / 2, H / 2 + 12);
+      $('chart-range').textContent = '';
+      return;
     }
   }
 
