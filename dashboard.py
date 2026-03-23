@@ -282,34 +282,51 @@ def api_pnl_history():
     from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT
 
     # ── Try settled-bet cumulative PnL first ──────────────────────────────────
+    def _row_pnl(row):
+        result = str(row["result"]).strip().upper()
+        amt = float(row.get("entered_$", 0) or 0)
+        odds = float(row.get("odds", 0) or 0)
+        if result == "WIN":
+            return amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
+        elif result == "LOSS":
+            return -amt
+        return 0.0
+
+    def _cum_series(daily_dict, all_dates):
+        running = 0.0
+        out = []
+        for d in all_dates:
+            running += daily_dict.get(d, 0.0)
+            out.append(round(running, 2))
+        return out
+
     settled_daily: dict[str, float] = {}
+    group_daily: dict[str, dict[str, dict[str, float]]] = {"book": {}, "market": {}}
+
     if TRACKER_PATH.exists():
         try:
             df = pd.read_csv(TRACKER_PATH)
             settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
             settled["date"] = settled["date"].astype(str).str.strip()
             for _, row in settled.iterrows():
-                result = str(row["result"]).strip().upper()
-                amt = float(row.get("entered_$", 0) or 0)
-                odds = float(row.get("odds", 0) or 0)
                 d = str(row["date"])
-                if result == "WIN":
-                    settled_daily[d] = settled_daily.get(d, 0.0) + (
-                        amt * (odds / 100) if odds > 0 else amt * (100 / abs(odds))
-                    )
-                elif result == "LOSS":
-                    settled_daily[d] = settled_daily.get(d, 0.0) - amt
+                pnl = _row_pnl(row)
+                settled_daily[d] = settled_daily.get(d, 0.0) + pnl
+                for gk, col in [("book", "bookmaker"), ("market", "market")]:
+                    key = str(row.get(col, "unknown") or "unknown").strip().lower()
+                    if key not in group_daily[gk]:
+                        group_daily[gk][key] = {}
+                    group_daily[gk][key][d] = group_daily[gk][key].get(d, 0.0) + pnl
         except Exception:
             pass
 
     if settled_daily:
-        items = sorted(settled_daily.items())
-        dates, values, running = [], [], 0.0
-        for d, v in items:
-            running += v
-            dates.append(d)
-            values.append(round(running, 2))
-        return jsonify({"dates": dates, "values": values, "mode": "pnl"})
+        all_dates = sorted(settled_daily.keys())
+        values = _cum_series(settled_daily, all_dates)
+        groups = {}
+        for gk, subdict in group_daily.items():
+            groups[gk] = {name: _cum_series(daily, all_dates) for name, daily in subdict.items()}
+        return jsonify({"dates": all_dates, "values": values, "mode": "pnl", "groups": groups})
 
     # ── Fall back to balance log (shows total balance over time) ──────────────
     if BALANCE_LOG_PATH.exists():
@@ -581,6 +598,9 @@ button:active{opacity:.7}
 .btn-push{background:var(--yellow);color:#000}
 .btn-blue{background:var(--blue);color:#000}
 .empty{padding:20px 14px;color:var(--muted);font-size:.82rem;text-align:center}
+/* chart toggles */
+.chart-tog{font-size:.68rem;padding:2px 7px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer}
+.chart-tog.active{background:var(--accent);color:#fff;border-color:var(--accent)}
 /* open bets tiles */
 .open-books{display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;align-items:flex-start}
 .open-book-col{flex:1;min-width:300px}
@@ -616,8 +636,20 @@ button:active{opacity:.7}
 <div class="books-row" id="books-row"></div>
 
 <section id="chart-section">
-  <div class="sec-hdr"><span id="chart-title">Cumulative P&amp;L</span><span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span><button onclick="showAdjModal()" style="margin-left:auto;font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">+ Adjustment</button></div>
-  <div style="padding:14px"><canvas id="pnl-chart" style="width:100%;height:260px"></canvas></div>
+  <div class="sec-hdr">
+    <span id="chart-title">Cumulative P&amp;L</span>
+    <span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span>
+    <div style="display:flex;gap:4px;margin-left:auto;align-items:center">
+      <div id="chart-toggles" style="display:flex;gap:3px">
+        <button class="chart-tog active" onclick="setChartGroup('all')">All</button>
+        <button class="chart-tog" onclick="setChartGroup('book')">By Book</button>
+        <button class="chart-tog" onclick="setChartGroup('market')">By Market</button>
+      </div>
+      <button onclick="showAdjModal()" style="font-size:.7rem;padding:2px 8px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--muted);cursor:pointer">+ Adjustment</button>
+    </div>
+  </div>
+  <div style="padding:14px 14px 6px"><canvas id="pnl-chart" style="width:100%;height:260px"></canvas></div>
+  <div id="chart-legend" style="display:flex;flex-wrap:wrap;gap:8px;padding:0 14px 10px;font-size:.7rem"></div>
 </section>
 
 <div id="adj-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center">
@@ -899,8 +931,17 @@ async function refreshLines() {
 // ── P&L Chart ─────────────────────────────────────────────────────────────────
 let _chartDates = [], _chartValues = [];
 let _tradeLabels = [], _tradePnl = [];
-
 let _chartMode = 'empty';
+let _chartGroups = {};   // { book: {name: [values]}, market: {name: [values]} }
+let _chartGroup = 'all'; // 'all' | 'book' | 'market'
+
+const GROUP_COLORS = ['#58a6ff','#f0883e','#bc8cff','#3fb950','#ff7b72','#ffa657','#79c0ff','#d2a8ff'];
+
+function setChartGroup(g) {
+  _chartGroup = g;
+  document.querySelectorAll('.chart-tog').forEach(b => b.classList.toggle('active', b.getAttribute('onclick').includes("'" + g + "'")));
+  drawChart();
+}
 
 function showAdjModal() {
   const m = $('adj-modal'); if (m) { m.style.display = 'flex'; $('adj-amount').focus(); }
@@ -923,6 +964,7 @@ async function loadChart() {
     _chartDates = d.dates || [];
     _chartValues = d.values || [];
     _chartMode = d.mode || 'empty';
+    _chartGroups = d.groups || {};
     const title = $('chart-title');
     if (title) title.textContent = _chartMode === 'balance' ? 'Balance vs Deposit' : 'Cumulative P&L';
     drawChart();
@@ -955,7 +997,6 @@ function drawChart() {
 
   const toGain = (_state.to_gain || 0);
   const toLose = (_state.to_lose || 0);
-  const hasFork = toGain > 0 || toLose > 0;
   const deposit = _state.deposit || 0;
   const n = _chartValues.length;
   // offset all historical values by deposit so chart starts at deposit level
@@ -964,8 +1005,18 @@ function drawChart() {
   // fork starts from actual tradeable balance, not the settled-close value
   const forkBase = (_state.total_balance !== undefined && _state.total_balance !== null)
     ? _state.total_balance : lastVal;
-  const gainVal = lastVal + toGain;   // win: recover stake + profit
-  const lossVal = forkBase;           // lose: just liquid balance remains
+  const gainVal = lastVal + toGain;
+  const lossVal = forkBase;
+
+  // multi-series data (by book or market)
+  const isGrouped = _chartGroup !== 'all' && _chartGroups[_chartGroup] && Object.keys(_chartGroups[_chartGroup]).length > 0;
+  const groupEntries = isGrouped
+    ? Object.entries(_chartGroups[_chartGroup]).map(([name, vals], ci) => ({
+        name, vals: vals.map(v => v + deposit), color: GROUP_COLORS[ci % GROUP_COLORS.length]
+      }))
+    : [];
+
+  const hasFork = !isGrouped && (toGain > 0 || toLose > 0);
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
   const ch = H - pad.top  - pad.bottom;
@@ -975,7 +1026,9 @@ function drawChart() {
   const toX = i => pad.left + (n <= 1 ? 0 : (i / (n - 1)) * histW);
   const forkTipX = pad.left + cw;
 
-  const allVals = hasFork ? [...chartVals, forkBase, gainVal, lossVal] : chartVals;
+  const allVals = hasFork
+    ? [...chartVals, forkBase, gainVal, lossVal]
+    : isGrouped ? [deposit, ...groupEntries.flatMap(g => g.vals)] : chartVals;
   const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
   const range = max - min || 1;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
@@ -1000,24 +1053,42 @@ function drawChart() {
     ctx.fillText('$' + t.toFixed(0), pad.left - 6, y + 3);
   });
 
-  // historical fill area (solid history only, not the connector to forkBase)
-  const lineColor = lastVal >= deposit ? '#3fb950' : '#f85149';
-  const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-  grad.addColorStop(0, lastVal >= deposit ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
-  grad.addColorStop(1, 'rgba(0,0,0,0)');
-  ctx.beginPath();
-  ctx.moveTo(toX(0), zero);
-  chartVals.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
-  ctx.lineTo(toX(n - 1), zero);
-  ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
+  if (isGrouped) {
+    // multi-line: one line per group, no fill
+    groupEntries.forEach(({vals, color}) => {
+      ctx.beginPath();
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+      ctx.setLineDash([]);
+      vals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+      ctx.stroke();
+    });
+    // update legend
+    const leg = $('chart-legend');
+    if (leg) leg.innerHTML = groupEntries.map(({name, color}) =>
+      `<span style="display:flex;align-items:center;gap:4px;color:var(--fg)">` +
+      `<span style="width:14px;height:3px;background:${color};border-radius:2px;display:inline-block"></span>${name}</span>`
+    ).join('');
+  } else {
+    // single line with fill
+    const leg = $('chart-legend');
+    if (leg) leg.innerHTML = '';
+    const lineColor = lastVal >= deposit ? '#3fb950' : '#f85149';
+    const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
+    grad.addColorStop(0, lastVal >= deposit ? 'rgba(63,185,80,.25)' : 'rgba(248,81,73,.25)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.beginPath();
+    ctx.moveTo(toX(0), zero);
+    chartVals.forEach((v, i) => ctx.lineTo(toX(i), toY(v)));
+    ctx.lineTo(toX(n - 1), zero);
+    ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
 
-  // historical line
-  ctx.beginPath();
-  ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
-  ctx.setLineDash([]);
-  chartVals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
-  ctx.stroke();
+    ctx.beginPath();
+    ctx.strokeStyle = lineColor; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.setLineDash([]);
+    chartVals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
+    ctx.stroke();
+  }
 
   if (hasFork) {
     const forkX   = toX(n - 1);
