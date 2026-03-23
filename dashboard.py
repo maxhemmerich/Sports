@@ -277,6 +277,27 @@ def sse():
     return resp
 
 
+@app.route("/api/pnl_debug")
+def api_pnl_debug():
+    import traceback
+    from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT
+    out = {"tracker_exists": TRACKER_PATH.exists(), "balance_exists": BALANCE_LOG_PATH.exists(),
+           "tracker_path": str(TRACKER_PATH), "error": None, "columns": [], "rows": 0,
+           "settled_rows": 0, "sample_result_vals": []}
+    if TRACKER_PATH.exists():
+        try:
+            import pandas as pd
+            df = pd.read_csv(TRACKER_PATH)
+            out["columns"] = df.columns.tolist()
+            out["rows"] = len(df)
+            out["sample_result_vals"] = df["result"].astype(str).str.strip().unique().tolist()[:10] if "result" in df.columns else []
+            settled = df[df["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])]
+            out["settled_rows"] = len(settled)
+        except Exception:
+            out["error"] = traceback.format_exc()
+    return jsonify(out)
+
+
 @app.route("/api/pnl_history")
 def api_pnl_history():
     from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT
