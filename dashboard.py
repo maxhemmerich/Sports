@@ -201,7 +201,7 @@ def _build_state() -> dict:
         "total_balance": round(total_balance, 2),
         "full_balance": round(full_balance, 2),
         "deposit": round(DEPOSIT, 2),
-        "net_profit": round(full_balance - DEPOSIT, 2) if DEPOSIT > 0 else None,
+        "net_profit": round(overall_pnl, 2),
         "wagered": round(wagered, 2),
         "to_gain": round(to_gain, 2),
         "to_lose": round(to_lose, 2),
@@ -759,6 +759,8 @@ section{background:var(--card);border:1px solid var(--border);border-radius:var(
 input[type=number]{background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);padding:4px 7px;width:65px;font-size:.82rem}
 button{border:none;border-radius:4px;padding:6px 13px;font-size:.78rem;font-weight:700;cursor:pointer;transition:opacity .15s}
 button:active{opacity:.7}
+.chart-tog{background:var(--border);color:var(--muted);font-weight:600}
+.chart-tog.active{background:var(--green);color:#000}
 .btn-place{background:var(--green);color:#000}
 .btn-skip{background:var(--border);color:var(--muted)}
 .btn-win{background:var(--green);color:#000}
@@ -1074,13 +1076,10 @@ function render(d) {
   $('c-bal').className = 'card-value ' + balClass;
   $('c-bal').innerHTML = '$' + d.total_balance.toFixed(2) + pct(d.total_balance - full, full);
 
-  if (d.net_profit !== null && d.net_profit !== undefined) {
-    const np = d.net_profit;
+  {
+    const np = d.net_profit ?? 0;
     $('c-net').className = 'card-value ' + (np >= 0 ? 'green' : 'red');
     $('c-net').innerHTML = (np >= 0 ? '+' : '') + '$' + np.toFixed(2) + pct(np, dep);
-  } else {
-    $('c-net').className = 'card-value muted';
-    $('c-net').textContent = 'set DEPOSIT';
   }
   $('c-wag').innerHTML = '$' + d.wagered.toFixed(2) + pct(d.wagered, full);
   $('c-gain').innerHTML = '+$' + d.to_gain.toFixed(2) + pct(d.to_gain, full);
