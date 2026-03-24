@@ -16,7 +16,7 @@ import json
 import os
 import sys
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +29,18 @@ from data import load_gamelogs
 from features import build_live_features, MARKET_CONFIG
 from model import load_model, predict
 from odds import get_today_lines, american_to_decimal, implied_probability
+
+
+def _game_date_local(commence_time: str) -> str:
+    """Convert UTC commence_time ISO string to local calendar date (YYYY-MM-DD)."""
+    ct = (commence_time or "").strip()
+    if not ct:
+        return date.today().isoformat()
+    try:
+        dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%Y-%m-%d")
+    except Exception:
+        return ct[:10] if len(ct) >= 10 else date.today().isoformat()
 
 # ── Config ────────────────────────────────────────────────────────────────────
 NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")   # set in .env to enable push notifications via ntfy.sh
@@ -180,7 +192,7 @@ def screen_player(
     )
 
     opp_abbr = away_team[:3].upper() if is_home_approx else home_team[:3].upper()
-    game_date = commence_time[:10] if commence_time else date.today().isoformat()
+    game_date = _game_date_local(commence_time)
 
     feats = build_live_features(
         player_name=player_name,
@@ -914,8 +926,7 @@ def _log_slip(bets_df: pd.DataFrame, raw: str) -> None:
             print(f"  [skip] Row {row_num} out of range.", flush=True)
             continue
         row = bets_df.iloc[idx]
-        _ct = str(row.get("commence_time", "") or "").strip()
-        _game_date = _ct[:10] if len(_ct) >= 10 else date.today().isoformat()
+        _game_date = _game_date_local(str(row.get("commence_time", "") or ""))
         print(f"  {row['player']} | {row.get('market','').replace('player_','')} | {row['side']} {row['line']} @ {int(row['odds']):+d} — ${entered:.0f}", flush=True)
         logged.append({
             "date": _game_date,

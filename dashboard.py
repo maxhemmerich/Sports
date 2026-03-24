@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +32,18 @@ app.config["SECRET_KEY"] = "nba-props-dash"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _game_date_local(commence_time: str) -> str:
+    """Convert UTC commence_time ISO string to local calendar date (YYYY-MM-DD)."""
+    ct = (commence_time or "").strip()
+    if not ct:
+        return date.today().isoformat()
+    try:
+        dt = datetime.fromisoformat(ct.replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%Y-%m-%d")
+    except Exception:
+        return ct[:10] if len(ct) >= 10 else date.today().isoformat()
+
 
 def _american_to_decimal(odds: float) -> float:
     if odds > 0:
@@ -508,8 +520,7 @@ def api_place():
         return jsonify({"error": "bet not found in current list"}), 404
 
     row = row_df.iloc[0]
-    _ct = str(row.get("commence_time", "") or "").strip()
-    _game_date = _ct[:10] if len(_ct) >= 10 else date.today().isoformat()
+    _game_date = _game_date_local(str(row.get("commence_time", "") or ""))
     entry = {
         "date": _game_date,
         "player": row["player"],
@@ -1031,38 +1042,47 @@ const fmtOdds = n => (n > 0 ? '+' : '') + n;
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
 
-// ── Auto-settle busted bets after delay ───────────────────────────────────────
+// ── Auto-settle timers (busted unders + final games) ─────────────────────────
 const BUST_DELAY_MS = 60_000;  // 60 seconds
-const _bustTimers = {};  // tracker_idx → {timeoutId, deadline}
+const _bustTimers = {};  // tracker_idx → {tid, deadline, settling, result, reason}
+
+function _scheduleSettle(trackerIdx, result, reason) {
+  const existing = _bustTimers[trackerIdx];
+  if (existing) {
+    // already scheduled for same result — leave it alone
+    if (existing.result === result) return;
+    // result changed (data correction) — cancel and reschedule only if not settling
+    if (existing.settling) return;
+    clearTimeout(existing.tid);
+    delete _bustTimers[trackerIdx];
+  }
+  const deadline = Date.now() + BUST_DELAY_MS;
+  const tid = setTimeout(async () => {
+    _bustTimers[trackerIdx].settling = true;
+    await settle(trackerIdx, result);
+    delete _bustTimers[trackerIdx];
+  }, BUST_DELAY_MS);
+  _bustTimers[trackerIdx] = { tid, deadline, settling: false, result, reason };
+}
+
+function _cancelSettle(trackerIdx) {
+  const t = _bustTimers[trackerIdx];
+  if (t && !t.settling) { clearTimeout(t.tid); delete _bustTimers[trackerIdx]; }
+}
 
 function _checkBust(trackerIdx, isBusted) {
-  if (isBusted) {
-    if (!_bustTimers[trackerIdx]) {
-      const deadline = Date.now() + BUST_DELAY_MS;
-      const tid = setTimeout(async () => {
-        // mark as settling BEFORE await so renderOpen won't restart the timer
-        _bustTimers[trackerIdx].settling = true;
-        await settle(trackerIdx, 'LOSS');
-        delete _bustTimers[trackerIdx];  // clean up only after settle completes
-      }, BUST_DELAY_MS);
-      _bustTimers[trackerIdx] = { tid, deadline, settling: false };
-    }
-  } else {
-    // stat dropped back (data correction) — cancel only if not already settling
-    const t = _bustTimers[trackerIdx];
-    if (t && !t.settling) {
-      clearTimeout(t.tid);
-      delete _bustTimers[trackerIdx];
-    }
-  }
+  if (isBusted) _scheduleSettle(trackerIdx, 'LOSS', 'busted');
+  else _cancelSettle(trackerIdx);
+}
+
+function _checkFinal(trackerIdx, isFinal, result) {
+  if (isFinal && result) _scheduleSettle(trackerIdx, result, 'final');
+  // don't cancel on !isFinal — data could flicker; let bust logic handle its own cancels
 }
 
 function cancelBust(trackerIdx) {
-  if (_bustTimers[trackerIdx]) {
-    clearTimeout(_bustTimers[trackerIdx].tid);
-    delete _bustTimers[trackerIdx];
-    renderOpen();  // re-render to remove countdown
-  }
+  _cancelSettle(trackerIdx);
+  renderOpen();
 }
 
 // ── Book filters for Potential / Open bets ────────────────────────────────────
@@ -1140,13 +1160,18 @@ function renderOpen() {
           const statKey = _MKT_STAT[b.market] || b.market;
           let liveHtml = '';
           let busted = false;
+          let finalResult = null;
           if (live) {
             const cur = live[statKey] ?? '–';
             const curNum = typeof cur === 'number' ? cur : parseFloat(cur);
-            // busted = mathematically can no longer win (not yet final — still live)
             const isFinal = live.status === 'final';
+            // busted = mathematically eliminated before final
             busted = !isFinal && !isNaN(curNum) && (b.side === 'UNDER' && curNum >= b.line);
             _checkBust(b.tracker_idx, busted);
+            if (isFinal && !isNaN(curNum)) {
+              finalResult = curNum === b.line ? 'PUSH' : (b.side === 'OVER' ? (curNum > b.line ? 'WIN' : 'LOSS') : (curNum < b.line ? 'WIN' : 'LOSS'));
+              _checkFinal(b.tracker_idx, true, finalResult);
+            }
             const pct = b.line > 0 ? Math.min(curNum / b.line, 1) : 0;
             const barColor = b.side === 'OVER'
               ? (curNum >= b.line ? '#3fb950' : curNum / b.line > 0.75 ? '#d29922' : '#58a6ff')
@@ -1167,13 +1192,17 @@ function renderOpen() {
           }
           const timer = _bustTimers[b.tracker_idx];
           const secsLeft = timer ? Math.ceil((timer.deadline - Date.now()) / 1000) : null;
-          const bustBadge = busted
-            ? (timer?.settling
-                ? `<div class="bust-badge">&#9888; BUSTED — settling...</div>`
-                : `<div class="bust-badge">&#9888; BUSTED — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`)
-            : '';
+          let statusBadge = '';
+          if (timer?.settling) {
+            statusBadge = `<div class="bust-badge">settling...</div>`;
+          } else if (timer?.reason === 'final') {
+            const rc = timer.result === 'WIN' ? 'var(--green)' : timer.result === 'LOSS' ? 'var(--red)' : 'var(--muted)';
+            statusBadge = `<div class="bust-badge" style="border-color:${rc};color:${rc}">FINAL ${timer.result} — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`;
+          } else if (busted) {
+            statusBadge = `<div class="bust-badge">&#9888; BUSTED — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`;
+          }
           return `<div class="open-tile${busted ? ' bust' : ''}">
-            ${bustBadge}
+            ${statusBadge}
             <div class="tile-player">${b.player}</div>
             <div class="tile-meta">
               ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
