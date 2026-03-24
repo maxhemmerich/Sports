@@ -486,13 +486,11 @@ def run_screener(
     bets_df = pd.DataFrame(results).sort_values("edge_pct", ascending=False).reset_index(drop=True)
 
     # Per-player cap: take top N props per player by edge (prevents correlated loss)
+    # DataFrame is already sorted by edge_pct desc, so cumcount gives rank within player.
     if MAX_BETS_PER_PLAYER > 0:
-        bets_df = (
-            bets_df.groupby("player", group_keys=False)
-            .apply(lambda g: g.head(MAX_BETS_PER_PLAYER), include_groups=False)
-            .sort_values("edge_pct", ascending=False)
-            .reset_index(drop=True)
-        )
+        bets_df = bets_df[
+            bets_df.groupby("player").cumcount() < MAX_BETS_PER_PLAYER
+        ].reset_index(drop=True)
 
     # Cap to top N bets FIRST so scaling is based only on shown bets
     if MAX_BETS > 0:
