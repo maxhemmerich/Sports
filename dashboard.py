@@ -781,6 +781,8 @@ button:active{opacity:.7}
 .open-book-hdr{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);border-bottom:1px solid var(--border);padding-bottom:5px;margin-bottom:6px}
 .open-tile-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .open-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px}
+.open-tile.bust{border-color:var(--red);background:rgba(248,81,73,.07)}
+.bust-badge{font-size:.68rem;font-weight:700;color:var(--red);letter-spacing:.05em;margin-bottom:3px}
 .tile-player{font-weight:600;font-size:.85rem;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile-meta{font-size:.72rem;color:var(--muted);margin-bottom:5px;line-height:1.4}
 .tile-actions{display:flex;gap:4px}
@@ -1031,13 +1033,21 @@ function renderOpen() {
           const live = _liveStats[(b.player||'').toLowerCase()];
           const statKey = _MKT_STAT[b.market] || b.market;
           let liveHtml = '';
+          let busted = false;
           if (live) {
             const cur = live[statKey] ?? '–';
-            const pct = b.line > 0 ? Math.min(cur / b.line, 1) : 0;
+            const curNum = typeof cur === 'number' ? cur : parseFloat(cur);
+            // busted = mathematically can no longer win (not yet final — still live)
+            const isFinal = live.status === 'final';
+            busted = !isFinal && !isNaN(curNum) && (
+              (b.side === 'UNDER' && curNum >= b.line) ||
+              (b.side === 'OVER'  && false)  // OVER can't be busted mid-game
+            );
+            const pct = b.line > 0 ? Math.min(curNum / b.line, 1) : 0;
             const barColor = b.side === 'OVER'
-              ? (cur >= b.line ? '#3fb950' : cur / b.line > 0.75 ? '#d29922' : '#58a6ff')
-              : (cur >= b.line ? '#f85149' : '#3fb950');
-            const statusStr = live.status === 'final' ? 'Final' : (live.clock || '');
+              ? (curNum >= b.line ? '#3fb950' : curNum / b.line > 0.75 ? '#d29922' : '#58a6ff')
+              : (curNum >= b.line ? '#f85149' : '#3fb950');
+            const statusStr = isFinal ? 'Final' : (live.clock || '');
             liveHtml = `<div class="live-bar-wrap">
               <div class="live-bar-track"><div class="live-bar-fill" style="width:${(pct*100).toFixed(1)}%;background:${barColor}"></div></div>
               <span class="live-cur" style="color:${barColor}">${cur}</span><span class="live-line">/${b.line}</span>
@@ -1046,7 +1056,8 @@ function renderOpen() {
           } else {
             liveHtml = `<div class="live-bar-wrap" style="color:var(--muted);font-style:italic">Not Started</div>`;
           }
-          return `<div class="open-tile">
+          return `<div class="open-tile${busted ? ' bust' : ''}">
+            ${busted ? '<div class="bust-badge">&#9888; BUSTED — stat already past line</div>' : ''}
             <div class="tile-player">${b.player}</div>
             <div class="tile-meta">
               ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
@@ -1055,7 +1066,7 @@ function renderOpen() {
             ${liveHtml}
             <div class="tile-actions">
               <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">W</button>
-              <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">L</button>
+              <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')" ${busted ? 'style="outline:2px solid var(--red)"' : ''}>L</button>
               <button class="btn-push" onclick="settle(${b.tracker_idx},'PUSH')">P</button>
             </div>
           </div>`;
