@@ -848,6 +848,16 @@ button:active{opacity:.7}
 </div>
 
 <section>
+  <div class="sec-hdr"><span>Balances</span>
+    <span style="font-size:.72rem;color:var(--muted)">tradeable balance per book</span>
+  </div>
+  <div class="cfg-grid" id="bal-inputs"></div>
+  <div class="cfg-foot">
+    <button class="btn-blue" onclick="saveBalances()">Save Balances</button>
+  </div>
+</section>
+
+<section>
   <div class="sec-hdr">
     <span>Potential Bets</span><span id="pot-count"></span>
     <div id="pot-book-filters" style="display:flex;gap:3px;margin-left:auto;flex-wrap:wrap"></div>
@@ -871,16 +881,6 @@ button:active{opacity:.7}
     </div>
   </div>
   <div id="stats-body"><div class="empty">No settled bets yet</div></div>
-</section>
-
-<section>
-  <div class="sec-hdr"><span>Balances</span>
-    <span style="font-size:.72rem;color:var(--muted)">tradeable balance per book</span>
-  </div>
-  <div class="cfg-grid" id="bal-inputs"></div>
-  <div class="cfg-foot">
-    <button class="btn-blue" onclick="saveBalances()">Save Balances</button>
-  </div>
 </section>
 
 <section>
