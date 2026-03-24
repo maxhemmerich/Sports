@@ -442,6 +442,13 @@ def api_pnl_history():
         for t in trades:
             running += t[2]
             values.append(round(running, 2))
+        # cumulative deposit line: DEPOSIT + all deposit/withdrawal amounts up to each index
+        dep_running = 0.0
+        deposit_line = []
+        for t in trades:
+            if t[5] in ("deposit", "withdrawal"):
+                dep_running += t[2]
+            deposit_line.append(round(DEPOSIT + dep_running, 2))
         # per-group cumulative series (same length, 0 for trades not in group)
         def _group_series(gk, name):
             r = 0.0
@@ -461,6 +468,7 @@ def api_pnl_history():
         return jsonify({
             "dates": labels, "values": values, "mode": "pnl", "groups": groups,
             "trade_types": trade_types, "trade_pnl": trade_pnl_list, "trade_labels": trade_labels_list,
+            "deposit_line": deposit_line,
         })
 
     # ── Fall back to balance log (shows total balance over time) ──────────────
@@ -1308,7 +1316,7 @@ async function refreshLines() {
 }
 
 // ── P&L Chart ─────────────────────────────────────────────────────────────────
-let _chartDates = [], _chartValues = [];
+let _chartDates = [], _chartValues = [], _depositLine = [];
 let _tradeLabels = [], _tradePnl = [], _tradeTypes = [];
 let _chartMode = 'empty';
 let _chartGroups = {};    // { book: {name: [values]}, market: {name: [values]} }
@@ -1400,9 +1408,10 @@ async function loadChart() {
     _chartMode = d.mode || 'empty';
     _chartGroups = d.groups || {};
     _chartGroupDates = d.group_dates || d.dates || [];
-    if (d.trade_types) _tradeTypes = d.trade_types;
-    if (d.trade_pnl)   _tradePnl   = d.trade_pnl;
+    if (d.trade_types)  _tradeTypes  = d.trade_types;
+    if (d.trade_pnl)    _tradePnl    = d.trade_pnl;
     if (d.trade_labels) _tradeLabels = d.trade_labels;
+    if (d.deposit_line) _depositLine = d.deposit_line;
     _populateChartDropdown();
     const title = $('chart-title');
     if (title) title.textContent = _chartMode === 'balance' ? 'Balance vs Deposit' : 'Cumulative P&L';
@@ -1493,7 +1502,8 @@ function drawChart() {
   }
 
   const allVals = hasFork ? [...displayVals, forkBase, gainVal, lossVal, trendVal] : displayVals;
-  const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
+  const depLineVals = (!filteredVals && _depositLine.length === _chartValues.length) ? _depositLine : [];
+  const min = Math.min(deposit, ...allVals, ...depLineVals), max = Math.max(deposit, ...allVals, ...depLineVals);
   const range = max - min || 1;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
   const zero = toY(deposit);
@@ -1516,6 +1526,22 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(pad.left - 4, y); ctx.lineTo(pad.left + cw, y); ctx.stroke();
     ctx.fillText('$' + t.toFixed(0), pad.left - 6, y + 3);
   });
+
+  // faint cumulative-deposit line (total capital put in)
+  if (!filteredVals && _depositLine.length === _chartValues.length && _depositLine.length > 1) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(139,148,158,0.35)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    _depositLine.forEach((v, i) => {
+      const x = toX(i), y = toY(v);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
 
   {
     const vals = displayVals;
