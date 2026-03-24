@@ -968,15 +968,18 @@ function _checkBust(trackerIdx, isBusted) {
     if (!_bustTimers[trackerIdx]) {
       const deadline = Date.now() + BUST_DELAY_MS;
       const tid = setTimeout(async () => {
-        delete _bustTimers[trackerIdx];
+        // mark as settling BEFORE await so renderOpen won't restart the timer
+        _bustTimers[trackerIdx].settling = true;
         await settle(trackerIdx, 'LOSS');
+        delete _bustTimers[trackerIdx];  // clean up only after settle completes
       }, BUST_DELAY_MS);
-      _bustTimers[trackerIdx] = { tid, deadline };
+      _bustTimers[trackerIdx] = { tid, deadline, settling: false };
     }
   } else {
-    // stat dropped back (data correction) — cancel
-    if (_bustTimers[trackerIdx]) {
-      clearTimeout(_bustTimers[trackerIdx].tid);
+    // stat dropped back (data correction) — cancel only if not already settling
+    const t = _bustTimers[trackerIdx];
+    if (t && !t.settling) {
+      clearTimeout(t.tid);
       delete _bustTimers[trackerIdx];
     }
   }
@@ -1093,7 +1096,9 @@ function renderOpen() {
           const timer = _bustTimers[b.tracker_idx];
           const secsLeft = timer ? Math.ceil((timer.deadline - Date.now()) / 1000) : null;
           const bustBadge = busted
-            ? `<div class="bust-badge">&#9888; BUSTED — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`
+            ? (timer?.settling
+                ? `<div class="bust-badge">&#9888; BUSTED — settling...</div>`
+                : `<div class="bust-badge">&#9888; BUSTED — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`)
             : '';
           return `<div class="open-tile${busted ? ' bust' : ''}">
             ${bustBadge}
