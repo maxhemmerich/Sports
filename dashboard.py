@@ -708,6 +708,13 @@ def _fetch_live_stats() -> dict[str, dict]:
         clock = f"{int(_cm.group(1) or 0)}:{int(float(_cm.group(2))):02d}" if _cm else _raw_clock
         if gstatus == 1:
             continue  # game hasn't started — no stats yet
+
+        # Team scores and tricodes come from the scoreboard (no extra request needed)
+        home_tri   = game.get("homeTeam", {}).get("teamTricode", "")
+        away_tri   = game.get("awayTeam", {}).get("teamTricode", "")
+        home_score = game.get("homeTeam", {}).get("score", "")
+        away_score = game.get("awayTeam", {}).get("score", "")
+
         try:
             bs = _req.get(
                 f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{gid}.json",
@@ -732,7 +739,8 @@ def _fetch_live_stats() -> dict[str, dict]:
                     "stl":  s.get("steals", 0),
                     "tov":  s.get("turnovers", 0),
                     "status": status_label,
-                    "clock": f"Q{period} {clock}".strip() if status_label == "live" else status_label,
+                    "away_tri": away_tri, "away_score": away_score,
+                    "home_tri": home_tri, "home_score": home_score,
                 }
     return result
 
@@ -853,12 +861,13 @@ button:active{opacity:.7}
 .tile-actions{display:flex;gap:4px}
 .tile-actions button{flex:1;padding:4px 0;font-size:.7rem}
 /* live progress bar */
-.live-bar-wrap{display:flex;align-items:center;gap:5px;margin:5px 0 3px;font-size:.72rem}
+.live-bar-wrap{display:flex;align-items:center;gap:5px;margin:5px 0 2px;font-size:.72rem}
 .live-bar-track{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
 .live-bar-fill{height:100%;border-radius:3px;transition:width .4s ease}
 .live-cur{font-weight:700;min-width:1.5em;text-align:right}
 .live-line{color:var(--muted)}
-.live-clock{margin-left:auto;color:var(--muted);font-size:.65rem;white-space:nowrap}
+.game-score{font-size:.68rem;color:var(--muted);margin-bottom:3px;letter-spacing:.02em}
+.game-score .score-num{font-weight:700;color:var(--text)}
 /* config */
 .cfg-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px}
 @media(min-width:520px){.cfg-grid{grid-template-columns:repeat(3,1fr)}}
@@ -1181,17 +1190,17 @@ function renderOpen() {
             const barColor = b.side === 'OVER'
               ? (curNum >= b.line ? '#3fb950' : curNum / b.line > 0.75 ? '#d29922' : '#58a6ff')
               : (curNum >= b.line ? '#f85149' : '#3fb950');
-            const _clock = live.clock || '';
-            const _iso = _clock.match(/^PT(?:(\d+)M)?(\d+(?:\.\d+)?)S$/);
-            const clockStr = _iso
-              ? `${_iso[1] || '0'}:${String(Math.floor(parseFloat(_iso[2]))).padStart(2,'0')}`
-              : _clock;
-            const statusStr = isFinal ? 'Final' : clockStr;
-            liveHtml = `<div class="live-bar-wrap">
+            const statBar = `<div class="live-bar-wrap">
               <div class="live-bar-track"><div class="live-bar-fill" style="width:${(pct*100).toFixed(1)}%;background:${barColor}"></div></div>
               <span class="live-cur" style="color:${barColor}">${cur}</span><span class="live-line">/${b.line}</span>
-              <span class="live-clock">${statusStr}</span>
             </div>`;
+            const at = live.away_tri || ''; const hs = live.home_score ?? '';
+            const ht = live.home_tri || ''; const as_ = live.away_score ?? '';
+            const scoreStr = (at && ht)
+              ? `${at} <span class="score-num">${as_}</span> · <span class="score-num">${hs}</span> ${ht}${isFinal ? ' <span style="opacity:.5">Final</span>' : ''}`
+              : (isFinal ? '<span style="opacity:.5">Final</span>' : '');
+            const scoreRow = scoreStr ? `<div class="game-score">${scoreStr}</div>` : '';
+            liveHtml = statBar + scoreRow;
           } else {
             liveHtml = `<div class="live-bar-wrap" style="color:var(--muted);font-style:italic">Not Started</div>`;
           }
