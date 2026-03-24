@@ -1029,6 +1029,7 @@ setInterval(refreshLiveStats, 60_000);
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
+es.onerror = () => { $('pnl').textContent = 'SSE disconnected — retrying...'; };
 es.onmessage = e => {
   let d;
   try { d = JSON.parse(e.data); } catch(_) { return; }
@@ -1249,8 +1250,11 @@ function renderOpen() {
 
 // ── Render ────────────────────────────────────────────────────────────────────
 function render(d) {
+  // Update status first so "connecting..." clears even if later sections throw
+  $('pnl').textContent = `Today ${sgn(d.today_pnl ?? 0)}  |  Overall ${sgn(d.overall_pnl ?? 0)}`;
+
   // Cards
-  const full = d.full_balance ?? d.total_balance;  // tradeable + at-risk
+  const full = d.full_balance ?? d.total_balance ?? 0;
   const dep  = d.deposit || 0;
 
   const pct = (num, base) => base > 0 ? ` <span class="card-pct">(${num >= 0 ? '+' : ''}${(num / base * 100).toFixed(1)}%)</span>` : '';
@@ -1267,7 +1271,6 @@ function render(d) {
   $('c-wag').innerHTML = '$' + d.wagered.toFixed(2) + pct(d.wagered, full);
   $('c-gain').innerHTML = '+$' + d.to_gain.toFixed(2) + pct(d.to_gain, full);
   $('c-risk').innerHTML = '-$' + d.to_lose.toFixed(2) + pct(d.to_lose, full);
-  $('pnl').textContent = `Today ${sgn(d.today_pnl)}  |  Overall ${sgn(d.overall_pnl)}`;
 
   // Books row
   const bi = d.book_info || {};
