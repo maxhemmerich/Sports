@@ -1076,7 +1076,12 @@ function renderOpen() {
             const barColor = b.side === 'OVER'
               ? (curNum >= b.line ? '#3fb950' : curNum / b.line > 0.75 ? '#d29922' : '#58a6ff')
               : (curNum >= b.line ? '#f85149' : '#3fb950');
-            const statusStr = isFinal ? 'Final' : (live.clock || '');
+            const _clock = live.clock || '';
+            const _iso = _clock.match(/^PT(?:(\d+)M)?(\d+(?:\.\d+)?)S$/);
+            const clockStr = _iso
+              ? `${_iso[1] || '0'}:${String(Math.floor(parseFloat(_iso[2]))).padStart(2,'0')}`
+              : _clock;
+            const statusStr = isFinal ? 'Final' : clockStr;
             liveHtml = `<div class="live-bar-wrap">
               <div class="live-bar-track"><div class="live-bar-fill" style="width:${(pct*100).toFixed(1)}%;background:${barColor}"></div></div>
               <span class="live-cur" style="color:${barColor}">${cur}</span><span class="live-line">/${b.line}</span>
