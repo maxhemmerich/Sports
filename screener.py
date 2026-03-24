@@ -47,7 +47,7 @@ RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
 BALANCE_LOG_PATH = RESULTS_DIR / "balance_log.csv"
 ADJUSTMENTS_PATH = RESULTS_DIR / "adjustments.csv"
-DEFAULT_BOOKS = ["draftkings", "fanduel"]
+DEFAULT_BOOKS = ["draftkings", "fanduel", "betmgm"]
 LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))          # seconds between screener runs
 LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))     # print timestamp every N iterations
 LINES_REFRESH_SECS = int(os.getenv("LINES_REFRESH_SECS", "900"))  # re-fetch odds API every 15 min
@@ -526,7 +526,7 @@ def auto_settle_bets(already_reported: set | None = None) -> list[str]:
         return []
 
     today = date.today().isoformat()
-    past = pending[pending["date"] < today]
+    past = pending[pending["date"] <= today]
     if past.empty:
         return []
 
@@ -1075,7 +1075,7 @@ if __name__ == "__main__":
     start_dashboard(_st, _latest_lock)
 
     print(f"\n[screener] Running — check every {args.interval}s  |  Ctrl-C to stop  |  r + Enter to force odds refresh", flush=True)
-    _ntfy("Screener started", f"Checking every {args.interval}s\nDK ${book_balances.get('draftkings', 0):.0f}  FD ${book_balances.get('fanduel', 0):.0f}", tags="white_check_mark")
+    _ntfy("Screener started", f"Checking every {args.interval}s\nDK ${book_balances.get('draftkings', 0):.0f}  FD ${book_balances.get('fanduel', 0):.0f}  MGM ${book_balances.get('betmgm', 0):.0f}", tags="white_check_mark")
 
     from datetime import datetime as _dt
 
