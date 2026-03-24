@@ -1080,8 +1080,9 @@ function _checkBust(trackerIdx, isBusted) {
 }
 
 function _checkFinal(trackerIdx, isFinal, result) {
-  if (isFinal && result) _scheduleSettle(trackerIdx, result, 'final');
-  // don't cancel on !isFinal — data could flicker; let bust logic handle its own cancels
+  if (!isFinal || !result) return;
+  if (_bustTimers[trackerIdx]) return;  // timer already running — never reschedule
+  _scheduleSettle(trackerIdx, result, 'final');
 }
 
 function cancelBust(trackerIdx) {
