@@ -560,19 +560,21 @@ def auto_settle_bets(already_reported: set | None = None) -> list[str]:
         logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
         logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
 
-        # If any past bets are still missing from the loaded logs, the cache may be
-        # stale (games finished after the last refresh). Force-refresh the current
-        # season once and reload.
+        # If any past bets are missing from the loaded logs the cache may be stale
+        # (games finished after the last refresh). Force-refresh once — only if the
+        # cache itself is older than 30 min so we don't hammer the API every tick.
         past_dates = set(past["date"].astype(str))
         logged_dates = {str(d) for d in logs["game_date"]}
         if past_dates - logged_dates:
             cache_path = DATA_DIR / f"gamelogs_{CURRENT_SEASON.replace('-', '_')}.csv"
-            if cache_path.exists():
-                cache_path.unlink()
-            with _cl.redirect_stdout(_buf):
-                logs = load_gamelogs()
-            logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
-            logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
+            cache_age_min = (time.time() - cache_path.stat().st_mtime) / 60 if cache_path.exists() else 999
+            if cache_age_min > 30:
+                if cache_path.exists():
+                    cache_path.unlink()
+                with _cl.redirect_stdout(_buf):
+                    logs = load_gamelogs()
+                logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
+                logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
     except Exception as e:
         return [f"[auto-settle] Could not load game logs: {e}"]
 
