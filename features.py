@@ -166,7 +166,7 @@ def add_travel_distance(df: pd.DataFrame) -> pd.DataFrame:
 
     coords = df.apply(venue_coords, axis=1)
     prev_coords = df.groupby("player_id").apply(
-        lambda g: g.apply(venue_coords, axis=1).shift(1)
+        lambda g: g.apply(venue_coords, axis=1).shift(1), include_groups=False
     ).reset_index(level=0, drop=True)
 
     def calc_dist(row_idx):
