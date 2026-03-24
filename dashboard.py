@@ -767,12 +767,21 @@ def start_dashboard(shared_st: dict, shared_lock: threading.Lock, port: int = 50
     except Exception:
         local_ip = "127.0.0.1"
 
+    # Check if port is already in use before starting
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _s:
+        if _s.connect_ex(("127.0.0.1", port)) == 0:
+            print(f"[dashboard] WARNING: port {port} already in use — kill the old process first", flush=True)
+            print(f"[dashboard]   Windows: netstat -ano | findstr :{port}  then  taskkill /PID <pid> /F", flush=True)
+
     print(f"[dashboard] http://localhost:{port}  |  http://{local_ip}:{port}", flush=True)
 
-    t = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False),
-        daemon=True,
-    )
+    def _run_flask():
+        try:
+            app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+        except OSError as e:
+            print(f"[dashboard] Flask failed to start: {e}", flush=True)
+
+    t = threading.Thread(target=_run_flask, daemon=True)
     t.start()
 
     print(f"[dashboard] Remote: cloudflared tunnel --url http://localhost:{port}", flush=True)
