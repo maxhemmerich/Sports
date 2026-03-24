@@ -261,6 +261,14 @@ def broadcast_state() -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+@app.errorhandler(Exception)
+def _json_error(e):
+    import traceback
+    msg = traceback.format_exc()
+    print(f"[dashboard] unhandled error: {msg}", flush=True)
+    return jsonify({"error": str(e)}), 500
+
+
 @app.route("/")
 def index():
     return _HTML
@@ -1298,15 +1306,22 @@ function render(d) {
 
 // ── Actions ───────────────────────────────────────────────────────────────────
 async function post(url, body) {
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(body),
-  });
-  const d = await r.json();
-  if (!r.ok) alert(d.error || 'Error');
-  return r.ok;
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    let d;
+    try { d = await r.json(); } catch(_) { d = {}; }
+    if (!r.ok) alert(d.error || `Server error ${r.status}`);
+    return r.ok;
+  } catch(e) {
+    alert('Network error: ' + e.message);
+    return false;
+  }
 }
+const apiFetch = post;
 
 async function refreshState() {
   try {
