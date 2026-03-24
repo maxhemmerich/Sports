@@ -194,11 +194,14 @@ def _build_state() -> dict:
     except Exception:
         pass
 
+    # full_balance = tradeable + at-risk (the "fork point" — settled value before pending resolve)
+    full_balance = total_balance + wagered
     return {
         "book_info": book_info,
         "total_balance": round(total_balance, 2),
+        "full_balance": round(full_balance, 2),
         "deposit": round(DEPOSIT, 2),
-        "net_profit": round(total_balance - DEPOSIT, 2) if DEPOSIT > 0 else None,
+        "net_profit": round(full_balance - DEPOSIT, 2) if DEPOSIT > 0 else None,
         "wagered": round(wagered, 2),
         "to_gain": round(to_gain, 2),
         "to_lose": round(to_lose, 2),
@@ -735,6 +738,7 @@ h1{font-size:1.15rem;color:var(--green)}
 .card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:14px 12px}
 .card-label{font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
 .card-value{font-size:1.35rem;font-weight:700}
+.card-pct{font-size:.75rem;font-weight:400;opacity:.75}
 .green{color:var(--green)} .red{color:var(--red)} .yellow{color:var(--yellow)} .blue{color:var(--blue)}
 /* book pills */
 .books-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:center}
@@ -1059,20 +1063,26 @@ function renderOpen() {
 // ── Render ────────────────────────────────────────────────────────────────────
 function render(d) {
   // Cards
+  const full = d.full_balance ?? d.total_balance;  // tradeable + at-risk
+  const dep  = d.deposit || 0;
+
+  const pct = (num, base) => base > 0 ? ` <span class="card-pct">(${num >= 0 ? '+' : ''}${(num / base * 100).toFixed(1)}%)</span>` : '';
+
   const balClass = d.total_balance >= 0 ? 'green' : 'red';
   $('c-bal').className = 'card-value ' + balClass;
-  $('c-bal').textContent = '$' + d.total_balance.toFixed(2);
+  $('c-bal').innerHTML = '$' + d.total_balance.toFixed(2) + pct(d.total_balance - full, full);
+
   if (d.net_profit !== null && d.net_profit !== undefined) {
     const np = d.net_profit;
     $('c-net').className = 'card-value ' + (np >= 0 ? 'green' : 'red');
-    $('c-net').textContent = (np >= 0 ? '+' : '') + '$' + np.toFixed(2);
+    $('c-net').innerHTML = (np >= 0 ? '+' : '') + '$' + np.toFixed(2) + pct(np, dep);
   } else {
     $('c-net').className = 'card-value muted';
     $('c-net').textContent = 'set DEPOSIT';
   }
-  $('c-wag').textContent = '$' + d.wagered.toFixed(2);
-  $('c-gain').textContent = '+$' + d.to_gain.toFixed(2);
-  $('c-risk').textContent = '-$' + d.to_lose.toFixed(2);
+  $('c-wag').innerHTML = '$' + d.wagered.toFixed(2) + pct(d.wagered, full);
+  $('c-gain').innerHTML = '+$' + d.to_gain.toFixed(2) + pct(d.to_gain, full);
+  $('c-risk').innerHTML = '-$' + d.to_lose.toFixed(2) + pct(d.to_lose, full);
   $('pnl').textContent = `Today ${sgn(d.today_pnl)}  |  Overall ${sgn(d.overall_pnl)}`;
 
   // Books row
@@ -1292,9 +1302,9 @@ function drawChart() {
   // offset all historical values by deposit so chart starts at deposit level
   const chartVals = _chartValues.map(v => v + deposit);
   const lastVal = chartVals[n - 1];
-  // fork starts from actual tradeable balance, not the settled-close value
-  const forkBase = (_state.total_balance !== undefined && _state.total_balance !== null)
-    ? _state.total_balance : lastVal;
+  // fork starts from full bankroll (tradeable + at-risk), not settled-only
+  const forkBase = (_state.full_balance !== undefined && _state.full_balance !== null)
+    ? _state.full_balance : lastVal;
   const gainVal = lastVal + toGain;
   const lossVal = forkBase;
 
