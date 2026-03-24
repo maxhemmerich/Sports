@@ -261,14 +261,6 @@ def broadcast_state() -> None:
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@app.errorhandler(Exception)
-def _json_error(e):
-    import traceback
-    msg = traceback.format_exc()
-    print(f"[dashboard] unhandled error: {msg}", flush=True)
-    return jsonify({"error": str(e)}), 500
-
-
 @app.route("/")
 def index():
     return _HTML
