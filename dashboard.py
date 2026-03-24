@@ -959,6 +959,37 @@ const fmtOdds = n => (n > 0 ? '+' : '') + n;
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
 
+// ── Auto-settle busted bets after delay ───────────────────────────────────────
+const BUST_DELAY_MS = 60_000;  // 60 seconds
+const _bustTimers = {};  // tracker_idx → {timeoutId, deadline}
+
+function _checkBust(trackerIdx, isBusted) {
+  if (isBusted) {
+    if (!_bustTimers[trackerIdx]) {
+      const deadline = Date.now() + BUST_DELAY_MS;
+      const tid = setTimeout(async () => {
+        delete _bustTimers[trackerIdx];
+        await settle(trackerIdx, 'LOSS');
+      }, BUST_DELAY_MS);
+      _bustTimers[trackerIdx] = { tid, deadline };
+    }
+  } else {
+    // stat dropped back (data correction) — cancel
+    if (_bustTimers[trackerIdx]) {
+      clearTimeout(_bustTimers[trackerIdx].tid);
+      delete _bustTimers[trackerIdx];
+    }
+  }
+}
+
+function cancelBust(trackerIdx) {
+  if (_bustTimers[trackerIdx]) {
+    clearTimeout(_bustTimers[trackerIdx].tid);
+    delete _bustTimers[trackerIdx];
+    renderOpen();  // re-render to remove countdown
+  }
+}
+
 // ── Book filters for Potential / Open bets ────────────────────────────────────
 let _potBooks = new Set(), _openBooks = new Set();  // empty = show all
 
@@ -1039,10 +1070,8 @@ function renderOpen() {
             const curNum = typeof cur === 'number' ? cur : parseFloat(cur);
             // busted = mathematically can no longer win (not yet final — still live)
             const isFinal = live.status === 'final';
-            busted = !isFinal && !isNaN(curNum) && (
-              (b.side === 'UNDER' && curNum >= b.line) ||
-              (b.side === 'OVER'  && false)  // OVER can't be busted mid-game
-            );
+            busted = !isFinal && !isNaN(curNum) && (b.side === 'UNDER' && curNum >= b.line);
+            _checkBust(b.tracker_idx, busted);
             const pct = b.line > 0 ? Math.min(curNum / b.line, 1) : 0;
             const barColor = b.side === 'OVER'
               ? (curNum >= b.line ? '#3fb950' : curNum / b.line > 0.75 ? '#d29922' : '#58a6ff')
@@ -1056,8 +1085,13 @@ function renderOpen() {
           } else {
             liveHtml = `<div class="live-bar-wrap" style="color:var(--muted);font-style:italic">Not Started</div>`;
           }
+          const timer = _bustTimers[b.tracker_idx];
+          const secsLeft = timer ? Math.ceil((timer.deadline - Date.now()) / 1000) : null;
+          const bustBadge = busted
+            ? `<div class="bust-badge">&#9888; BUSTED — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`
+            : '';
           return `<div class="open-tile${busted ? ' bust' : ''}">
-            ${busted ? '<div class="bust-badge">&#9888; BUSTED — stat already past line</div>' : ''}
+            ${bustBadge}
             <div class="tile-player">${b.player}</div>
             <div class="tile-meta">
               ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
@@ -1472,6 +1506,9 @@ function drawChart() {
 
 // Chart updates via SSE state; redraw on resize only
 window.addEventListener('resize', drawChart);
+
+// Refresh open bets every second so bust countdowns stay accurate
+setInterval(() => { if (Object.keys(_bustTimers).length) renderOpen(); }, 1000);
 
 // ── Bet Stats ─────────────────────────────────────────────────────────────────
 let _statsData = {};
