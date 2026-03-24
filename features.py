@@ -164,16 +164,28 @@ def add_travel_distance(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+_DEFENSE_STAT_DEFAULTS = {
+    "pts": 110.0, "reb": 43.0, "ast": 24.0,
+    "fg3m": 12.0, "blk": 5.0, "stl": 7.0, "tov": 13.0,
+}
+
+
 def add_defense_features(df: pd.DataFrame, def_lookup: pd.DataFrame) -> pd.DataFrame:
     """
-    Merge opponent avg_pts_allowed into game log df.
-    def_lookup has columns: team_abbreviation, season, avg_pts_allowed
-    Opponent abbreviation is derived from the matchup string.
+    Merge per-stat opponent defensive averages into game log df.
+    def_lookup has columns: team_abbreviation, season,
+                            avg_pts_allowed, avg_reb_allowed, avg_ast_allowed, ...
     """
     df = df.copy()
 
+    stat_cols = [f"avg_{s}_allowed" for s in _DEFENSE_STAT_DEFAULTS]
+    opp_cols  = [f"opp_{s}_allowed" for s in _DEFENSE_STAT_DEFAULTS]
+
     if def_lookup.empty or "matchup" not in df.columns:
-        df["opp_avg_pts_allowed"] = 110.0
+        for col, (_, default) in zip(opp_cols, _DEFENSE_STAT_DEFAULTS.items()):
+            df[col] = default
+        # backwards-compat alias
+        df["opp_avg_pts_allowed"] = _DEFENSE_STAT_DEFAULTS["pts"]
         return df
 
     df["opp_abbr_def"] = df.apply(
@@ -181,16 +193,27 @@ def add_defense_features(df: pd.DataFrame, def_lookup: pd.DataFrame) -> pd.DataF
         axis=1,
     )
 
+    avail_def_cols = [c for c in stat_cols if c in def_lookup.columns]
+    merge_cols = ["team_abbreviation", "season"] + avail_def_cols
     merged = df.merge(
-        def_lookup[["team_abbreviation", "season", "avg_pts_allowed"]].rename(
-            columns={"team_abbreviation": "opp_abbr_def"}
-        ),
+        def_lookup[merge_cols].rename(columns={"team_abbreviation": "opp_abbr_def"}),
         on=["opp_abbr_def", "season"],
         how="left",
     )
-    league_avg = merged["avg_pts_allowed"].median()
-    merged["opp_avg_pts_allowed"] = merged["avg_pts_allowed"].fillna(league_avg if not pd.isna(league_avg) else 110.0)
-    merged = merged.drop(columns=["avg_pts_allowed", "opp_abbr_def"], errors="ignore")
+
+    for stat, default in _DEFENSE_STAT_DEFAULTS.items():
+        src = f"avg_{stat}_allowed"
+        dst = f"opp_{stat}_allowed"
+        if src in merged.columns:
+            league_avg = merged[src].median()
+            merged[dst] = merged[src].fillna(league_avg if not pd.isna(league_avg) else default)
+            merged = merged.drop(columns=[src], errors="ignore")
+        else:
+            merged[dst] = default
+
+    # backwards-compat alias used by _CONTEXT_COLS
+    merged["opp_avg_pts_allowed"] = merged["opp_pts_allowed"]
+    merged = merged.drop(columns=["opp_abbr_def"], errors="ignore")
     return merged
 
 
@@ -273,51 +296,6 @@ def add_opp_pace(df: pd.DataFrame, pace_lookup: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-FEATURE_COLS = [
-    "roll_pts_5",
-    "roll_pts_10",
-    "roll_pts_20",
-    "ewm_pts_10",
-    "vs_opp_pts_avg",
-    "opp_avg_pts_allowed",
-    "opp_team_pace",
-    "days_rest",
-    "back_to_back",
-    "is_home",
-    "travel_km",
-    "roll_fga_10",
-]
-
-FEATURE_COLS_REB = [
-    "roll_reb_5",
-    "roll_reb_10",
-    "roll_reb_20",
-    "ewm_reb_10",
-    "vs_opp_reb_avg",
-    "opp_avg_pts_allowed",
-    "opp_team_pace",
-    "days_rest",
-    "back_to_back",
-    "is_home",
-    "travel_km",
-    "roll_fga_10",
-]
-
-FEATURE_COLS_AST = [
-    "roll_ast_5",
-    "roll_ast_10",
-    "roll_ast_20",
-    "ewm_ast_10",
-    "vs_opp_ast_avg",
-    "opp_avg_pts_allowed",
-    "opp_team_pace",
-    "days_rest",
-    "back_to_back",
-    "is_home",
-    "travel_km",
-    "roll_fga_10",
-]
-
 TARGET_COL = "pts"
 TARGET_COL_REB = "reb"
 TARGET_COL_AST = "ast"
@@ -326,9 +304,9 @@ TARGET_COL_BLK = "blk"
 TARGET_COL_STL = "stl"
 TARGET_COL_TOV = "tov"
 
-# Shared context features used by every model
+# Shared context features (non-stat-specific)
 _CONTEXT_COLS = [
-    "opp_avg_pts_allowed",
+    "opp_avg_pts_allowed",   # general defensive strength proxy (kept for all models)
     "opp_team_pace",
     "days_rest",
     "back_to_back",
@@ -337,10 +315,28 @@ _CONTEXT_COLS = [
     "roll_fga_10",
 ]
 
-FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "vs_opp_fg3m_avg"] + _CONTEXT_COLS
-FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "vs_opp_blk_avg"]  + _CONTEXT_COLS
-FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "vs_opp_stl_avg"]  + _CONTEXT_COLS
-FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "vs_opp_tov_avg"]  + _CONTEXT_COLS
+FEATURE_COLS = [
+    "roll_pts_5", "roll_pts_10", "roll_pts_20", "ewm_pts_10",
+    "vs_opp_pts_avg",
+    "opp_pts_allowed",       # market-specific: pts allowed by opponent
+] + _CONTEXT_COLS
+
+FEATURE_COLS_REB = [
+    "roll_reb_5", "roll_reb_10", "roll_reb_20", "ewm_reb_10",
+    "vs_opp_reb_avg",
+    "opp_reb_allowed",       # market-specific: reb allowed by opponent
+] + _CONTEXT_COLS
+
+FEATURE_COLS_AST = [
+    "roll_ast_5", "roll_ast_10", "roll_ast_20", "ewm_ast_10",
+    "vs_opp_ast_avg",
+    "opp_ast_allowed",       # market-specific: ast allowed by opponent
+] + _CONTEXT_COLS
+
+FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "vs_opp_fg3m_avg", "opp_fg3m_allowed"] + _CONTEXT_COLS
+FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "vs_opp_blk_avg",  "opp_blk_allowed"]  + _CONTEXT_COLS
+FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "vs_opp_stl_avg",  "opp_stl_allowed"]  + _CONTEXT_COLS
+FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "vs_opp_tov_avg",  "opp_tov_allowed"]  + _CONTEXT_COLS
 
 # Map market key → (feature_cols, target_col)
 MARKET_CONFIG = {
@@ -496,12 +492,18 @@ def build_live_features(
         if prev_venue and curr_venue:
             travel_km = haversine_km(prev_venue[0], prev_venue[1], curr_venue[0], curr_venue[1])
 
-    # Opponent defense — look up how many pts this team allows per game
-    opp_avg_pts_allowed = 110.0  # fallback league average
+    # Opponent defense — look up per-stat averages allowed by this team
+    opp_avg_pts_allowed = _DEFENSE_STAT_DEFAULTS["pts"]
+    opp_stat_allowed = _DEFENSE_STAT_DEFAULTS.get(stat_col, _DEFENSE_STAT_DEFAULTS["pts"])
     if not def_lookup.empty and "team_abbreviation" in def_lookup.columns:
         opp_rows = def_lookup[def_lookup["team_abbreviation"] == opponent_team_abbr]
         if not opp_rows.empty:
-            opp_avg_pts_allowed = float(opp_rows["avg_pts_allowed"].mean())
+            pts_col = "avg_pts_allowed" if "avg_pts_allowed" in opp_rows.columns else "opp_pts_allowed"
+            if pts_col in opp_rows.columns:
+                opp_avg_pts_allowed = float(opp_rows[pts_col].mean())
+            stat_allowed_col = f"avg_{stat_col}_allowed"
+            if stat_allowed_col in opp_rows.columns:
+                opp_stat_allowed = float(opp_rows[stat_allowed_col].mean())
 
     roll_fga_10 = 0.0
     if "fga" in player_df.columns:
@@ -526,20 +528,21 @@ def build_live_features(
         if not vs_opp_games.empty:
             vs_opp_avg = float(vs_opp_games[stat_col].mean())
 
-    prefix = stat_col  # pts / reb / ast
+    prefix = stat_col  # pts / reb / ast / fg3m / blk / stl / tov
     return {
-        f"roll_{prefix}_5":    roll5,
-        f"roll_{prefix}_10":   roll10,
-        f"roll_{prefix}_20":   roll20,
-        f"ewm_{prefix}_10":    ewm10,
-        f"vs_opp_{prefix}_avg": vs_opp_avg,
-        "opp_avg_pts_allowed": opp_avg_pts_allowed,
-        "opp_team_pace":       opp_team_pace,
-        "days_rest":           min(days_rest, 14),
-        "back_to_back":        back_to_back,
-        "is_home":             int(is_home),
-        "travel_km":           travel_km,
-        "roll_fga_10":         roll_fga_10,
+        f"roll_{prefix}_5":      roll5,
+        f"roll_{prefix}_10":     roll10,
+        f"roll_{prefix}_20":     roll20,
+        f"ewm_{prefix}_10":      ewm10,
+        f"vs_opp_{prefix}_avg":  vs_opp_avg,
+        f"opp_{prefix}_allowed": opp_stat_allowed,   # market-specific defensive stat
+        "opp_avg_pts_allowed":   opp_avg_pts_allowed, # general defensive strength
+        "opp_team_pace":         opp_team_pace,
+        "days_rest":             min(days_rest, 14),
+        "back_to_back":          back_to_back,
+        "is_home":               int(is_home),
+        "travel_km":             travel_km,
+        "roll_fga_10":           roll_fga_10,
     }
 
 

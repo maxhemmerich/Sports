@@ -124,14 +124,18 @@ def edge_from_prediction(
 
 def kelly_fraction(win_prob: float, decimal_odds: float, edge_pct: float = 0.0) -> float:
     """
-    Edge-proportional bet sizing: fraction = edge_pct / 200
-    (4% edge → 2% of bankroll, 8% → 4%, 20% → 10%, no cap)
-
-    Relative sizing is preserved when MAX_TOTAL_EXPOSURE scales the full slate down.
+    Half-Kelly criterion: f* = 0.5 * (b*p - q) / b
+    where b = decimal_odds - 1, p = win_prob, q = 1 - p.
+    Capped at MAX_KELLY_FRACTION per bet.
     """
-    if edge_pct <= 0:
+    if edge_pct <= 0 or win_prob <= 0:
         return 0.0
-    return edge_pct / 200.0
+    b = decimal_odds - 1.0
+    if b <= 0:
+        return 0.0
+    q = 1.0 - win_prob
+    kelly = (b * win_prob - q) / b
+    return max(0.0, min(kelly * 0.5, MAX_KELLY_FRACTION))
 
 
 def best_price_for_side(row: pd.Series, side: str) -> tuple[float | None, str | None]:

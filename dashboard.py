@@ -1037,7 +1037,7 @@ es.onmessage = e => {
 
 // ── Utils ─────────────────────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
-const sgn = n => (n >= 0 ? '+' : '') + '$' + Math.abs(n).toFixed(2);
+const sgn = n => (n >= 0 ? '+' : '-') + '$' + Math.abs(n).toFixed(2);
 const fmtOdds = n => (n > 0 ? '+' : '') + n;
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 function safeId(key) { return JSON.stringify(key).replace(/[^a-z0-9]/gi,'_'); }
@@ -1240,7 +1240,7 @@ function render(d) {
   {
     const np = d.net_profit ?? 0;
     $('c-net').className = 'card-value ' + (np >= 0 ? 'green' : 'red');
-    $('c-net').innerHTML = (np >= 0 ? '+' : '') + '$' + np.toFixed(2) + pct(np, dep);
+    $('c-net').innerHTML = (np >= 0 ? '+' : '') + '$' + np.toFixed(2) + pct(np, d.wagered);
   }
   $('c-wag').innerHTML = '$' + d.wagered.toFixed(2) + pct(d.wagered, full);
   $('c-gain').innerHTML = '+$' + d.to_gain.toFixed(2) + pct(d.to_gain, full);
