@@ -1114,7 +1114,7 @@ let _lastD = {};
 function renderPot() {
   const d = _lastD;
   const pot = (d.potential_bets || []).filter(b => !b.skipped && !b.placed);
-  const books = [...new Set(pot.map(b => (b.bookmaker||'').toLowerCase()).filter(Boolean))];
+  const books = Object.keys(d.book_info || {});
   _renderBookFilters('pot-book-filters', books, _potBooks, 'togglePotBook');
   const filtered = _potBooks.size === 0 ? pot : pot.filter(b => _potBooks.has((b.bookmaker||'').toLowerCase()));
   $('pot-count').textContent = `${filtered.length}${_potBooks.size ? '/' + pot.length : ''} available`;
@@ -1146,7 +1146,7 @@ function renderPot() {
 function renderOpen() {
   const d = _lastD;
   const open = d.open_bets || [];
-  const books = [...new Set(open.map(b => (b.bookmaker||'').toLowerCase()).filter(Boolean))];
+  const books = Object.keys(d.book_info || {});
   _renderBookFilters('open-book-filters', books, _openBooks, 'toggleOpenBook');
   const filtered = _openBooks.size === 0 ? open : open.filter(b => _openBooks.has((b.bookmaker||'').toLowerCase()));
   $('open-count').textContent = `${filtered.length}${_openBooks.size ? '/' + open.length : ''} pending`;
