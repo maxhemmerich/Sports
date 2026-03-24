@@ -66,7 +66,7 @@ ADJUSTMENTS_PATH = RESULTS_DIR / "adjustments.csv"
 DEFAULT_BOOKS = ["draftkings", "fanduel", "betmgm"]
 LOOP_INTERVAL = int(os.getenv("LOOP_INTERVAL", "60"))          # seconds between screener runs
 LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))     # print timestamp every N iterations
-LINES_REFRESH_SECS = int(os.getenv("LINES_REFRESH_SECS", "900"))  # re-fetch odds API every 15 min
+LINES_REFRESH_SECS = int(os.getenv("LINES_REFRESH_SECS", "1800"))  # re-fetch odds API every 30 min
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
 SIGMA_BY_MARKET = {

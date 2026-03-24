@@ -61,10 +61,11 @@ def _get(path: str, params: dict | None = None) -> dict | list:
 
 def fetch_today_events() -> list[dict]:
     """
-    Return NBA events commencing within the next 48 hours (always live).
+    Return NBA events commencing within the next 24 hours.
+    Keeps to 24h (not 48h) to avoid fetching tomorrow's games and burning API quota.
     """
     now_utc = datetime.now(timezone.utc)
-    window_end = now_utc + timedelta(hours=48)
+    window_end = now_utc + timedelta(hours=24)
 
     data = _get(f"/sports/{SPORT}/events")
     print(f"  [api] Total NBA events returned: {len(data)}")
@@ -81,7 +82,7 @@ def fetch_today_events() -> list[dict]:
         if now_utc <= commence_dt <= window_end:
             upcoming.append(ev)
 
-    print(f"  [api] {len(upcoming)} events in next 48h")
+    print(f"  [api] {len(upcoming)} events in next 24h")
     return upcoming
 
 
