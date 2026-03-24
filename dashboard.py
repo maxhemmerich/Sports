@@ -136,23 +136,28 @@ def _build_state() -> dict:
     potential: list[dict] = []
     if not bets.empty:
         for _, row in bets.iterrows():
-            key = _bet_key(row)
-            mkt = str(row.get("market", "")).replace("player_", "")
-            potential.append({
-                "key": list(key),
-                "player": str(row["player"]),
-                "market": mkt,
-                "line": _sf(row.get("line")),
-                "side": str(row["side"]),
-                "odds": _si(row.get("odds"), -110),
-                "bookmaker": str(row.get("bookmaker", "")),
-                "suggested": _si(row.get("bet_dollars")),
-                "edge_pct": round(_sf(row.get("edge_pct")), 1),
-                "prediction": round(_sf(row.get("prediction")), 1),
-                "game": str(row.get("game", "")),
-                "skipped": key in skipped,
-                "placed": key in placed,
-            })
+            try:
+                key = _bet_key(row)
+                # ensure key values are JSON-safe (no NaN floats)
+                safe_key = [k if not (isinstance(k, float) and k != k) else 0.0 for k in key]
+                mkt = str(row.get("market", "")).replace("player_", "")
+                potential.append({
+                    "key": safe_key,
+                    "player": str(row["player"]),
+                    "market": mkt,
+                    "line": _sf(row.get("line")),
+                    "side": str(row["side"]),
+                    "odds": _si(row.get("odds"), -110),
+                    "bookmaker": str(row.get("bookmaker", "")),
+                    "suggested": _si(row.get("bet_dollars")),
+                    "edge_pct": round(_sf(row.get("edge_pct")), 1),
+                    "prediction": round(_sf(row.get("prediction")), 1),
+                    "game": str(row.get("game", "")),
+                    "skipped": key in skipped,
+                    "placed": key in placed,
+                })
+            except Exception:
+                pass
 
     # ── PnL + chart history (single tracker read so chart == overall_pnl) ─────
     today_pnl = 0.0
@@ -268,7 +273,18 @@ def index():
 
 @app.route("/api/state")
 def api_state():
-    return jsonify(_build_state())
+    try:
+        return jsonify(_build_state())
+    except Exception as e:
+        print(f"[dashboard] /api/state error: {e}", flush=True)
+        import traceback; traceback.print_exc()
+        return jsonify({"error": str(e), "today_pnl": 0.0, "overall_pnl": 0.0,
+                        "total_balance": 0.0, "full_balance": 0.0, "deposit": 0.0,
+                        "net_profit": 0.0, "wagered": 0.0, "to_gain": 0.0, "to_lose": 0.0,
+                        "book_info": {}, "potential_bets": [], "open_bets": [],
+                        "active_books": [], "config": {"min_edge": 4.0, "min_diff": 1.5, "interval": 60},
+                        "chart_dates": [], "chart_values": [], "trade_labels": [],
+                        "trade_pnl": [], "trade_types": []})
 
 
 @app.route("/events")
@@ -290,7 +306,10 @@ def sse():
         while True:
             try:
                 data = q.get(timeout=20)
-                yield f"data: {json.dumps(data)}\n\n"
+                try:
+                    yield f"data: {json.dumps(data)}\n\n"
+                except Exception as _je:
+                    print(f"[dashboard] SSE serialize error: {_je}", flush=True)
             except queue.Empty:
                 yield 'data: {"ping":1}\n\n'
             except GeneratorExit:
@@ -1013,16 +1032,16 @@ async function refreshLiveStats() {
 
 // ── Initial load ──────────────────────────────────────────────────────────────
 fetch('/api/state').then(r => r.json()).then(d => {
-  if (!d.error) {
-    _state = d;
-    try { render(d); } catch(err) { console.error('render error:', err); }
-    if (d.chart_dates && d.chart_dates.length) {
-      _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
-      _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || []; _tradeTypes = d.trade_types || [];
-      const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
-    }
+  _state = d;
+  try { render(d); } catch(err) { console.error('render error:', err); }
+  if (!d.error && d.chart_dates && d.chart_dates.length) {
+    _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
+    _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || []; _tradeTypes = d.trade_types || [];
+    const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
   }
-}).catch(() => {}).finally(() => { loadChart(); refreshLiveStats(); });
+}).catch(() => {
+  document.getElementById('pnl').textContent = 'Server error — check logs';
+}).finally(() => { loadChart(); refreshLiveStats(); });
 
 // Poll live stats every 60 s while page is open
 setInterval(refreshLiveStats, 60_000);

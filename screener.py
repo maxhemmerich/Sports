@@ -772,7 +772,7 @@ def _at_risk_per_book() -> dict[str, float]:
         pending = df[df["result"].isna() | (df["result"].astype(str).str.strip() == "")]
         if pending.empty or "entered_$" not in pending.columns:
             return {}
-        return pending.groupby("bookmaker")["entered_$"].sum().to_dict()
+        return {k: float(v) for k, v in pending.groupby("bookmaker")["entered_$"].sum().items()}
     except Exception:
         return {}
 
