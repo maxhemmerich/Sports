@@ -860,8 +860,6 @@ button:active{opacity:.7}
 .live-bar-fill{height:100%;border-radius:3px;transition:width .4s ease}
 .live-cur{font-weight:700;min-width:1.5em;text-align:right}
 .live-line{color:var(--muted)}
-.game-bar-wrap{display:flex;align-items:center;gap:5px;margin-bottom:3px;font-size:.65rem;color:var(--muted)}
-.game-bar-track{flex:1;height:4px;background:var(--border);border-radius:3px;overflow:hidden}
 .game-bar-fill{height:100%;border-radius:3px;background:var(--muted);transition:width .4s ease}
 /* config */
 .cfg-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px}
@@ -1198,9 +1196,9 @@ function renderOpen() {
               const elapsed = (period - 1) * Q_SECS + (Q_SECS - clockSecs);
               gamePct = Math.min(elapsed / (4 * Q_SECS) * 100, 100);
             }
-            const finalLabel = isFinal ? '<span style="opacity:.5;font-size:.65rem">Final</span>' : '';
-            const gameBar = `<div class="game-bar-wrap">
-              <div class="game-bar-track"><div class="game-bar-fill" style="width:${gamePct.toFixed(1)}%"></div></div>
+            const finalLabel = isFinal ? '<span class="live-line">Final</span>' : '';
+            const gameBar = `<div class="live-bar-wrap">
+              <div class="live-bar-track"><div class="game-bar-fill" style="width:${gamePct.toFixed(1)}%"></div></div>
               ${finalLabel}
             </div>`;
             liveHtml = statBar + gameBar;
