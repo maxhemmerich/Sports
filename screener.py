@@ -227,7 +227,8 @@ def screen_player(
     except Exception:
         return None
 
-    sigma = SIGMA_BY_MARKET.get(market, 5.0)
+    # Use residual sigma from model training if available (data-driven), else fall back
+    sigma = getattr(model, "residual_sigma_", None) or SIGMA_BY_MARKET.get(market, 5.0)
     try:
         side, win_prob, edge_pct = edge_from_prediction(
             prediction, line, p_over_fair, p_under_fair, sigma=sigma

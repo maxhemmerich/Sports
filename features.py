@@ -3,7 +3,8 @@ features.py — Build feature matrix for each player-game.
 
 Features:
   - Rolling avg points/reb/ast (last 5, 10, 20 games)
-  - Opponent defensive rating (avg pts allowed to all players)
+  - Rolling avg minutes played (last 5, 10 games) — usage proxy
+  - Opponent defensive rating (avg pts/reb/ast allowed to all players)
   - Opponent team pace (avg team FGA per game — higher = faster pace)
   - Days rest since last game
   - Back-to-back flag
@@ -17,6 +18,18 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from data import load_gamelogs, build_defense_lookup
+
+
+def _parse_minutes(val) -> float:
+    """Parse NBA minutes string ('32:45' or '32.75' or 32) to float."""
+    try:
+        s = str(val).strip()
+        if ":" in s:
+            parts = s.split(":")
+            return float(parts[0]) + float(parts[1]) / 60
+        return float(s)
+    except (ValueError, TypeError):
+        return float("nan")
 
 MAX_CACHE_AGE_DAYS = int(__import__("os").getenv("MAX_CACHE_AGE_DAYS", "7"))
 
@@ -84,11 +97,14 @@ def _team_from_matchup(matchup: str, is_home: bool) -> str:
 
 def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add rolling average features (pts, reb, ast) per player.
+    Add rolling average features (pts, reb, ast, min, ...) per player.
     Expects df sorted by player_id, game_date.
     """
     df = df.sort_values(["player_id", "game_date"]).copy()
-    for stat in ["pts", "reb", "ast", "fg3m", "blk", "stl", "tov"]:
+    # Parse minutes to float if present
+    if "min" in df.columns:
+        df["min"] = df["min"].apply(_parse_minutes)
+    for stat in ["pts", "reb", "ast", "fg3m", "blk", "stl", "tov", "min"]:
         if stat not in df.columns:
             continue
         for window in [5, 10, 20]:
@@ -313,6 +329,9 @@ _CONTEXT_COLS = [
     "is_home",
     "travel_km",
     "roll_fga_10",
+    "roll_min_5",            # recent minutes — strongest usage proxy
+    "roll_min_10",
+    "ewm_min_10",
 ]
 
 FEATURE_COLS = [
@@ -352,9 +371,10 @@ MARKET_CONFIG = {
 
 def add_vs_opponent_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    For each game row, add the player's career avg pts/reb/ast vs that specific
-    opponent using only prior games (no lookahead). Falls back to roll_20 when
-    no prior history exists against that opponent.
+    For each game row, add the player's EWM-weighted avg pts/reb/ast vs that
+    specific opponent using only prior games (no lookahead). Using EWM (span=10)
+    instead of a flat expanding mean so recent matchups have more influence.
+    Falls back to ewm_stat_10 when no prior history exists against that opponent.
     """
     df = df.sort_values(["player_id", "game_date"]).copy()
     df["_opp_abbr"] = df.apply(
@@ -367,9 +387,9 @@ def add_vs_opponent_features(df: pd.DataFrame) -> pd.DataFrame:
         col = f"vs_opp_{stat}_avg"
         df[col] = (
             df.groupby(["player_id", "_opp_abbr"])[stat]
-            .transform(lambda x: x.shift(1).expanding(min_periods=1).mean())
+            .transform(lambda x: x.shift(1).ewm(span=10, min_periods=1).mean())
         )
-        fallback = f"roll_{stat}_20"
+        fallback = f"ewm_{stat}_10"
         if fallback in df.columns:
             df[col] = df[col].fillna(df[fallback])
     df = df.drop(columns=["_opp_abbr"])
@@ -509,6 +529,16 @@ def build_live_features(
     if "fga" in player_df.columns:
         roll_fga_10 = float(player_df["fga"].tail(10).mean())
 
+    # Minutes played — strongest usage proxy for all counting stats
+    roll_min_5 = float("nan")
+    roll_min_10 = float("nan")
+    ewm_min_10 = float("nan")
+    if "min" in player_df.columns:
+        min_series = player_df["min"].apply(_parse_minutes)
+        roll_min_5  = float(min_series.tail(5).mean())
+        roll_min_10 = float(min_series.tail(10).mean())
+        ewm_min_10  = float(min_series.ewm(span=10, min_periods=1).mean().iloc[-1])
+
     # Opponent team pace (avg FGA per game — higher = faster pace = more possessions)
     pace_lookup = build_pace_lookup()
     opp_team_pace = 85.0  # league avg fallback
@@ -517,8 +547,8 @@ def build_live_features(
         if not opp_row.empty:
             opp_team_pace = float(opp_row["team_avg_fga"].iloc[0])
 
-    # Player's historical avg vs this specific opponent (prior games only)
-    vs_opp_avg = roll20  # fallback: overall rolling mean
+    # Player's historical avg vs this specific opponent — EWM so recent games matter more
+    vs_opp_avg = ewm10  # fallback: recency-weighted overall mean
     if opponent_team_abbr and "matchup" in player_df.columns and "team_abbreviation" in player_df.columns:
         opp_flags = player_df.apply(
             lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))) == opponent_team_abbr,
@@ -526,7 +556,9 @@ def build_live_features(
         )
         vs_opp_games = player_df[opp_flags]
         if not vs_opp_games.empty:
-            vs_opp_avg = float(vs_opp_games[stat_col].mean())
+            vs_opp_avg = float(
+                vs_opp_games[stat_col].ewm(span=10, min_periods=1).mean().iloc[-1]
+            )
 
     prefix = stat_col  # pts / reb / ast / fg3m / blk / stl / tov
     return {
@@ -543,6 +575,9 @@ def build_live_features(
         "is_home":               int(is_home),
         "travel_km":             travel_km,
         "roll_fga_10":           roll_fga_10,
+        "roll_min_5":            roll_min_5,
+        "roll_min_10":           roll_min_10,
+        "ewm_min_10":            ewm_min_10,
     }
 
 

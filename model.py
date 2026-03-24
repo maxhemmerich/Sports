@@ -225,12 +225,16 @@ def _train_target(target: str, do_eval: bool, retrain: bool) -> XGBRegressor:
         print(f"  CV Mean MAE={metrics['mean_mae']:.2f}  RMSE={metrics['mean_rmse']:.2f}")
 
     model = train(X, y)
-    save_model(model, path)
 
     preds = model.predict(X)
     mae = mean_absolute_error(y, preds)
     rmse = root_mean_squared_error(y, preds)
-    print(f"  In-sample MAE={mae:.2f}  RMSE={rmse:.2f}")
+    residuals = y.values - preds
+    residual_sigma = float(np.std(residuals))
+    # Store sigma on the model so screener can use data-driven edge estimates
+    model.residual_sigma_ = residual_sigma
+    save_model(model, path)
+    print(f"  In-sample MAE={mae:.2f}  RMSE={rmse:.2f}  residual_sigma={residual_sigma:.2f}")
 
     imp_df = feature_importance(model, list(X.columns))
     print(imp_df.to_string(index=False))
