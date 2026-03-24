@@ -610,6 +610,74 @@ def api_config():
     return jsonify({"ok": True})
 
 
+# ── Live box score stats ───────────────────────────────────────────────────────
+import time as _time
+_live_cache: dict = {"ts": 0.0, "data": {}}
+_LIVE_TTL = 60  # seconds between refreshes
+
+def _fetch_live_stats() -> dict[str, dict]:
+    """
+    Fetch today's NBA live box scores from the NBA CDN.
+    Returns {player_name_lower: {pts, reb, ast, fg3m, blk, stl, tov, status, clock}}
+    Status is one of: 'pre', 'live', 'final'
+    """
+    import requests as _req
+    result: dict[str, dict] = {}
+    try:
+        sb = _req.get(
+            "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json",
+            timeout=8,
+        ).json()
+        games = sb.get("scoreboard", {}).get("games", [])
+    except Exception:
+        return result
+
+    for game in games:
+        gid = game.get("gameId", "")
+        gstatus = game.get("gameStatus", 1)  # 1=pre, 2=live, 3=final
+        clock = game.get("gameClock", "")
+        period = game.get("period", 0)
+        status_label = "pre" if gstatus == 1 else ("final" if gstatus == 3 else "live")
+        if gstatus == 1:
+            continue  # game hasn't started — no stats yet
+        try:
+            bs = _req.get(
+                f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{gid}.json",
+                timeout=8,
+            ).json()
+        except Exception:
+            continue
+        for team_key in ("homeTeam", "awayTeam"):
+            team = bs.get("game", {}).get(team_key, {})
+            for p in team.get("players", []):
+                name = p.get("name", "").strip()
+                if not name:
+                    continue
+                s = p.get("statistics", {})
+                result[name.lower()] = {
+                    "name": name,
+                    "pts":  s.get("points", 0),
+                    "reb":  s.get("reboundsTotal", 0),
+                    "ast":  s.get("assists", 0),
+                    "fg3m": s.get("threePointersMade", 0),
+                    "blk":  s.get("blocks", 0),
+                    "stl":  s.get("steals", 0),
+                    "tov":  s.get("turnovers", 0),
+                    "status": status_label,
+                    "clock": f"Q{period} {clock}".strip() if status_label == "live" else status_label,
+                }
+    return result
+
+
+@app.route("/api/live_stats")
+def api_live_stats():
+    now = _time.time()
+    if now - _live_cache["ts"] > _LIVE_TTL:
+        _live_cache["data"] = _fetch_live_stats()
+        _live_cache["ts"] = now
+    return jsonify(_live_cache["data"])
+
+
 # ── Start ─────────────────────────────────────────────────────────────────────
 
 def start_dashboard(shared_st: dict, shared_lock: threading.Lock, port: int = 5050) -> None:
@@ -711,6 +779,13 @@ button:active{opacity:.7}
 .tile-meta{font-size:.72rem;color:var(--muted);margin-bottom:5px;line-height:1.4}
 .tile-actions{display:flex;gap:4px}
 .tile-actions button{flex:1;padding:4px 0;font-size:.7rem}
+/* live progress bar */
+.live-bar-wrap{display:flex;align-items:center;gap:5px;margin:5px 0 3px;font-size:.72rem}
+.live-bar-track{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
+.live-bar-fill{height:100%;border-radius:3px;transition:width .4s ease}
+.live-cur{font-weight:700;min-width:1.5em;text-align:right}
+.live-line{color:var(--muted)}
+.live-clock{margin-left:auto;color:var(--muted);font-size:.65rem;white-space:nowrap}
 /* config */
 .cfg-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px}
 @media(min-width:520px){.cfg-grid{grid-template-columns:repeat(3,1fr)}}
@@ -817,6 +892,19 @@ button:active{opacity:.7}
 
 <script>
 let _state = {};
+let _liveStats = {};  // player_name_lower -> {pts, reb, ast, fg3m, blk, stl, tov, status, clock}
+
+const _MKT_STAT = {
+  points: 'pts', rebounds: 'reb', assists: 'ast',
+  threes: 'fg3m', blocks: 'blk', steals: 'stl', turnovers: 'tov',
+};
+
+async function refreshLiveStats() {
+  try {
+    const r = await fetch('/api/live_stats');
+    if (r.ok) { _liveStats = await r.json(); renderOpen(); }
+  } catch(_) {}
+}
 
 // ── Initial load ──────────────────────────────────────────────────────────────
 fetch('/api/state').then(r => r.json()).then(d => {
@@ -829,7 +917,10 @@ fetch('/api/state').then(r => r.json()).then(d => {
       const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
     }
   }
-}).catch(() => {}).finally(() => loadChart());
+}).catch(() => {}).finally(() => { loadChart(); refreshLiveStats(); });
+
+// Poll live stats every 60 s while page is open
+setInterval(refreshLiveStats, 60_000);
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
 const es = new EventSource('/events');
@@ -931,12 +1022,29 @@ function renderOpen() {
         <div class="open-tile-grid">` +
         bets.map(b => {
           const sideClass = b.side === 'OVER' ? 'over' : 'under';
+          const live = _liveStats[(b.player||'').toLowerCase()];
+          const statKey = _MKT_STAT[b.market] || b.market;
+          let liveHtml = '';
+          if (live) {
+            const cur = live[statKey] ?? '–';
+            const pct = b.line > 0 ? Math.min(cur / b.line, 1) : 0;
+            const barColor = b.side === 'OVER'
+              ? (cur >= b.line ? '#3fb950' : cur / b.line > 0.75 ? '#d29922' : '#58a6ff')
+              : (cur >= b.line ? '#f85149' : '#3fb950');
+            const statusStr = live.status === 'final' ? 'Final' : (live.clock || '');
+            liveHtml = `<div class="live-bar-wrap">
+              <div class="live-bar-track"><div class="live-bar-fill" style="width:${(pct*100).toFixed(1)}%;background:${barColor}"></div></div>
+              <span class="live-cur" style="color:${barColor}">${cur}</span><span class="live-line">/${b.line}</span>
+              <span class="live-clock">${statusStr}</span>
+            </div>`;
+          }
           return `<div class="open-tile">
             <div class="tile-player">${b.player}</div>
             <div class="tile-meta">
               ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
               <strong>$${b.entered.toFixed(2)}</strong> → <span class="green">+$${b.to_win.toFixed(2)}</span> · ${b.date}
             </div>
+            ${liveHtml}
             <div class="tile-actions">
               <button class="btn-win"  onclick="settle(${b.tracker_idx},'WIN')">W</button>
               <button class="btn-loss" onclick="settle(${b.tracker_idx},'LOSS')">L</button>
