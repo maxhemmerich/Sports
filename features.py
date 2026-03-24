@@ -112,6 +112,12 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
                 df.groupby("player_id")[stat]
                 .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
             )
+        # Rolling std (consistency signal) — higher = more volatile player
+        for window in [5, 10]:
+            df[f"roll_{stat}_std_{window}"] = (
+                df.groupby("player_id")[stat]
+                .transform(lambda x: x.shift(1).rolling(window, min_periods=2).std().fillna(0))
+            )
         # Exponentially-weighted mean (span=10 ≈ half-life of ~7 games)
         df[f"ewm_{stat}_10"] = (
             df.groupby("player_id")[stat]
@@ -350,26 +356,29 @@ _CONTEXT_COLS = [
 
 FEATURE_COLS = [
     "roll_pts_5", "roll_pts_10", "roll_pts_20", "ewm_pts_10",
+    "roll_pts_std_5", "roll_pts_std_10",   # consistency signal
     "vs_opp_pts_avg",
     "opp_pts_allowed",       # market-specific: pts allowed by opponent
 ] + _CONTEXT_COLS
 
 FEATURE_COLS_REB = [
     "roll_reb_5", "roll_reb_10", "roll_reb_20", "ewm_reb_10",
+    "roll_reb_std_5", "roll_reb_std_10",
     "vs_opp_reb_avg",
     "opp_reb_allowed",       # market-specific: reb allowed by opponent
 ] + _CONTEXT_COLS
 
 FEATURE_COLS_AST = [
     "roll_ast_5", "roll_ast_10", "roll_ast_20", "ewm_ast_10",
+    "roll_ast_std_5", "roll_ast_std_10",
     "vs_opp_ast_avg",
     "opp_ast_allowed",       # market-specific: ast allowed by opponent
 ] + _CONTEXT_COLS
 
-FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "vs_opp_fg3m_avg", "opp_fg3m_allowed"] + _CONTEXT_COLS
-FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "vs_opp_blk_avg",  "opp_blk_allowed"]  + _CONTEXT_COLS
-FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "vs_opp_stl_avg",  "opp_stl_allowed"]  + _CONTEXT_COLS
-FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "vs_opp_tov_avg",  "opp_tov_allowed"]  + _CONTEXT_COLS
+FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "roll_fg3m_std_5", "roll_fg3m_std_10", "vs_opp_fg3m_avg", "opp_fg3m_allowed"] + _CONTEXT_COLS
+FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "roll_blk_std_5",  "roll_blk_std_10",  "vs_opp_blk_avg",  "opp_blk_allowed"]  + _CONTEXT_COLS
+FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "roll_stl_std_5",  "roll_stl_std_10",  "vs_opp_stl_avg",  "opp_stl_allowed"]  + _CONTEXT_COLS
+FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "roll_tov_std_5",  "roll_tov_std_10",  "vs_opp_tov_avg",  "opp_tov_allowed"]  + _CONTEXT_COLS
 
 # Map market key → (feature_cols, target_col)
 MARKET_CONFIG = {
@@ -500,6 +509,11 @@ def build_live_features(
     roll10 = float(stat_series.tail(10).mean())
     roll20 = float(stat_series.tail(20).mean())
     ewm10  = float(stat_series.ewm(span=10, min_periods=1).mean().iloc[-1])
+    # Consistency signal: 0 when too few games to compute std
+    roll_std5  = float(stat_series.tail(5).std())  if len(stat_series) >= 2 else 0.0
+    roll_std10 = float(stat_series.tail(10).std()) if len(stat_series) >= 2 else 0.0
+    if pd.isna(roll_std5):  roll_std5  = 0.0
+    if pd.isna(roll_std10): roll_std10 = 0.0
 
     last_game = player_df.iloc[-1]
     last_date = pd.Timestamp(last_game["game_date"])
@@ -584,11 +598,13 @@ def build_live_features(
 
     prefix = stat_col  # pts / reb / ast / fg3m / blk / stl / tov
     return {
-        f"roll_{prefix}_5":      roll5,
-        f"roll_{prefix}_10":     roll10,
-        f"roll_{prefix}_20":     roll20,
-        f"ewm_{prefix}_10":      ewm10,
-        f"vs_opp_{prefix}_avg":  vs_opp_avg,
+        f"roll_{prefix}_5":        roll5,
+        f"roll_{prefix}_10":       roll10,
+        f"roll_{prefix}_20":       roll20,
+        f"ewm_{prefix}_10":        ewm10,
+        f"roll_{prefix}_std_5":    roll_std5,
+        f"roll_{prefix}_std_10":   roll_std10,
+        f"vs_opp_{prefix}_avg":    vs_opp_avg,
         f"opp_{prefix}_allowed": opp_stat_allowed,   # market-specific defensive stat
         "opp_avg_pts_allowed":   opp_avg_pts_allowed, # general defensive strength
         "opp_team_pace":         opp_team_pace,

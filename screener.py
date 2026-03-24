@@ -52,6 +52,8 @@ MAX_KELLY_FRACTION = float(os.getenv("MAX_KELLY_FRACTION", "0.05"))  # cap at 5%
 MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "1.0"))  # max total bankroll % across all bets
 MAX_BETS = int(os.getenv("MAX_BETS", "20"))            # max bets to show/recommend (top N by edge)
 MAX_BETS_PER_PLAYER = int(os.getenv("MAX_BETS_PER_PLAYER", "2"))  # max props per player (0 = no limit)
+MAX_BETS_PER_GAME = int(os.getenv("MAX_BETS_PER_GAME", "3"))      # max correlated bets per game (0 = no limit)
+MIN_WIN_PROB = float(os.getenv("MIN_WIN_PROB", "0.53"))            # minimum model win probability to flag
 MIN_GAMES = int(os.getenv("MIN_GAMES", "20"))           # min career games in DB before flagging
 MIN_SEASON_GAMES = int(os.getenv("MIN_SEASON_GAMES", "15"))  # min games in current season (Oct–present)
 CURRENT_SEASON_START = "2025-10-01"
@@ -240,6 +242,9 @@ def screen_player(
         edge_pct = (win_prob - 0.5) * 100
 
     if edge_pct < MIN_EDGE_PCT:
+        return None
+
+    if win_prob < MIN_WIN_PROB:
         return None
 
     price_col = float(over_price) if side == "OVER" else float(under_price)
@@ -490,6 +495,12 @@ def run_screener(
     if MAX_BETS_PER_PLAYER > 0:
         bets_df = bets_df[
             bets_df.groupby("player").cumcount() < MAX_BETS_PER_PLAYER
+        ].reset_index(drop=True)
+
+    # Per-game cap: limit correlated bets on the same game (e.g. blowout risk)
+    if MAX_BETS_PER_GAME > 0 and "game" in bets_df.columns:
+        bets_df = bets_df[
+            bets_df.groupby("game").cumcount() < MAX_BETS_PER_GAME
         ].reset_index(drop=True)
 
     # Cap to top N bets FIRST so scaling is based only on shown bets
