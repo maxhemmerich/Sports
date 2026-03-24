@@ -775,12 +775,29 @@ def start_dashboard(shared_st: dict, shared_lock: threading.Lock, port: int = 50
     t.start()
 
     # Auto-launch cloudflared tunnel and print the public URL when found
-    import shutil, subprocess, re as _re
-    if shutil.which("cloudflared"):
+    import shutil, subprocess, re as _re, stat as _stat, urllib.request as _req
+    _cf_bin = shutil.which("cloudflared")
+    if not _cf_bin:
+        # Try to download cloudflared binary if not installed
+        _cf_local = Path(__file__).parent / ".cloudflared"
+        if not _cf_local.exists():
+            try:
+                _url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+                print("[dashboard] Downloading cloudflared ...", flush=True)
+                _req.urlretrieve(_url, _cf_local)
+                _cf_local.chmod(_cf_local.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+                _cf_bin = str(_cf_local)
+                print("[dashboard] cloudflared downloaded.", flush=True)
+            except Exception as _e:
+                print(f"[dashboard] Could not download cloudflared: {_e}", flush=True)
+        elif _cf_local.exists():
+            _cf_bin = str(_cf_local)
+
+    if _cf_bin:
         def _tunnel():
             try:
                 proc = subprocess.Popen(
-                    ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+                    [_cf_bin, "tunnel", "--url", f"http://localhost:{port}"],
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                 )
                 for line in proc.stdout:

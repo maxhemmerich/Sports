@@ -592,10 +592,20 @@ def auto_settle_bets(already_reported: set | None = None) -> list[str]:
     not_found: list[str] = []
 
     for orig_idx, row in past.iterrows():
+        # Skip rows where player or date are clearly malformed (e.g. numeric values in player column)
+        _player_raw = row.get("player", "")
+        _date_raw = row.get("date", "")
+        if pd.isna(_player_raw) or pd.isna(_date_raw):
+            continue
+        try:
+            float(_player_raw)
+            continue  # player is a number — corrupted row
+        except (ValueError, TypeError):
+            pass
         market = str(row.get("market", ""))
         stat_col = _MARKET_STAT.get(market)
         if stat_col is None:
-            not_found.append(f"{row['player']} ({market} unknown)")
+            not_found.append(f"{_player_raw} ({market} unknown)")
             continue
 
         game_date = row["date"]
