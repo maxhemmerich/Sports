@@ -277,6 +277,8 @@ def sse():
     _clients.append(q)
 
     def generate():
+        # 4KB padding comment — flushes Cloudflare's proxy buffer on connect
+        yield ": " + "x" * 4096 + "\n\n"
         # initial snapshot
         try:
             yield f"data: {json.dumps(_build_state())}\n\n"
@@ -287,7 +289,7 @@ def sse():
             yield 'data: {"error":"state build failed"}\n\n'
         while True:
             try:
-                data = q.get(timeout=30)
+                data = q.get(timeout=20)
                 yield f"data: {json.dumps(data)}\n\n"
             except queue.Empty:
                 yield 'data: {"ping":1}\n\n'
@@ -295,7 +297,7 @@ def sse():
                 break
 
     resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Cache-Control"] = "no-cache, no-transform"
     resp.headers["X-Accel-Buffering"] = "no"
     return resp
 
