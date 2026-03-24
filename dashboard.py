@@ -774,10 +774,10 @@ button:active{opacity:.7}
 .stats-tbl tr:hover td{background:rgba(255,255,255,.03)}
 .stats-win{color:var(--green)}.stats-loss{color:var(--red)}.stats-neu{color:var(--muted)}
 /* open bets tiles */
-.open-books{display:flex;gap:10px;padding:10px 14px;flex-wrap:wrap;align-items:flex-start}
-.open-book-col{flex:1;min-width:300px}
+.open-books{display:flex;flex-direction:column;gap:16px;padding:10px 14px}
+.open-book-col{width:100%}
 .open-book-hdr{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);border-bottom:1px solid var(--border);padding-bottom:5px;margin-bottom:6px}
-.open-tile-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.open-tile-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .open-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px}
 .tile-player{font-weight:600;font-size:.85rem;margin-bottom:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tile-meta{font-size:.72rem;color:var(--muted);margin-bottom:5px;line-height:1.4}
@@ -1020,7 +1020,7 @@ function renderOpen() {
   const byBook = {};
   filtered.forEach(b => { (byBook[b.bookmaker] = byBook[b.bookmaker] || []).push(b); });
   ol.innerHTML = '<div class="open-books">' +
-    Object.entries(byBook).map(([book, bets]) =>
+    Object.entries(byBook).sort(([a],[b]) => a.localeCompare(b)).map(([book, bets]) =>
       `<div class="open-book-col">
         <div class="open-book-hdr">${cap(book)} (${bets.length})</div>
         <div class="open-tile-grid">` +
@@ -1041,6 +1041,8 @@ function renderOpen() {
               <span class="live-cur" style="color:${barColor}">${cur}</span><span class="live-line">/${b.line}</span>
               <span class="live-clock">${statusStr}</span>
             </div>`;
+          } else {
+            liveHtml = `<div class="live-bar-wrap" style="color:var(--muted);font-style:italic">Not Started</div>`;
           }
           return `<div class="open-tile">
             <div class="tile-player">${b.player}</div>
