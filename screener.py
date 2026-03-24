@@ -304,15 +304,9 @@ def run_screener(
     if "market" in lines_df.columns:
         lines_df = lines_df[lines_df["market"].isin(supported_markets)]
 
-    # Filter to specific bookmaker(s) if requested
+    # Filter to specific bookmaker(s) if requested (active_books toggle only — balance does not hide bets)
     if bookmaker_filter and "bookmaker" in lines_df.columns:
         lower_filter = [b.lower() for b in bookmaker_filter]
-        # Drop books with zero tradeable balance
-        if book_tradeable:
-            lower_filter = [b for b in lower_filter if book_tradeable.get(b, 0.0) > 0]
-            if not lower_filter:
-                print("[screener] All books have $0 tradeable balance — no bets to flag.")
-                return pd.DataFrame()
         mask = lines_df["bookmaker"].str.lower().isin(lower_filter)
         lines_df = lines_df[mask]
         if lines_df.empty:
