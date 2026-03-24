@@ -1563,7 +1563,7 @@ function drawChart() {
     ctx.stroke();
   }
 
-  // deposit / withdrawal vertical markers (only on main series, not filtered view)
+  // deposit / withdrawal amount labels at top (no vertical lines)
   if (!filteredVals) {
     ctx.save();
     ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
@@ -1571,10 +1571,6 @@ function drawChart() {
       if (typ !== 'deposit' && typ !== 'withdrawal') return;
       const x = toX(i);
       const color = typ === 'deposit' ? '#58a6ff' : '#d29922';
-      ctx.setLineDash([3, 3]);
-      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + ch); ctx.stroke();
-      // arrow + amount label at top
       const amt = _tradePnl[i];
       const sign = amt >= 0 ? '+' : '';
       ctx.fillStyle = color;
