@@ -702,18 +702,13 @@ def _fetch_live_stats() -> dict[str, dict]:
         _raw_clock = game.get("gameClock", "")
         period = game.get("period", 0)
         status_label = "pre" if gstatus == 1 else ("final" if gstatus == 3 else "live")
-        # parse ISO 8601 duration e.g. "PT05M30.00S" → "5:30"
         import re as _re
         _cm = _re.match(r'PT(?:(\d+)M)?(\d+(?:\.\d+)?)S', _raw_clock)
-        clock = f"{int(_cm.group(1) or 0)}:{int(float(_cm.group(2))):02d}" if _cm else _raw_clock
+        # seconds remaining in this quarter
+        clock_secs = (int(_cm.group(1) or 0) * 60 + float(_cm.group(2))) if _cm else 0.0
         if gstatus == 1:
             continue  # game hasn't started — no stats yet
 
-        # Team scores and tricodes come from the scoreboard (no extra request needed)
-        home_tri   = game.get("homeTeam", {}).get("teamTricode", "")
-        away_tri   = game.get("awayTeam", {}).get("teamTricode", "")
-        home_score = game.get("homeTeam", {}).get("score", "")
-        away_score = game.get("awayTeam", {}).get("score", "")
 
         try:
             bs = _req.get(
@@ -739,8 +734,7 @@ def _fetch_live_stats() -> dict[str, dict]:
                     "stl":  s.get("steals", 0),
                     "tov":  s.get("turnovers", 0),
                     "status": status_label,
-                    "away_tri": away_tri, "away_score": away_score,
-                    "home_tri": home_tri, "home_score": home_score,
+                    "period": period, "clock_secs": clock_secs,
                 }
     return result
 
@@ -866,8 +860,9 @@ button:active{opacity:.7}
 .live-bar-fill{height:100%;border-radius:3px;transition:width .4s ease}
 .live-cur{font-weight:700;min-width:1.5em;text-align:right}
 .live-line{color:var(--muted)}
-.game-score{font-size:.68rem;color:var(--muted);margin-bottom:3px;letter-spacing:.02em}
-.game-score .score-num{font-weight:700;color:var(--text)}
+.game-bar-wrap{display:flex;align-items:center;gap:5px;margin-bottom:3px;font-size:.65rem;color:var(--muted)}
+.game-bar-track{flex:1;height:4px;background:var(--border);border-radius:3px;overflow:hidden}
+.game-bar-fill{height:100%;border-radius:3px;background:var(--muted);transition:width .4s ease}
 /* config */
 .cfg-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;padding:14px}
 @media(min-width:520px){.cfg-grid{grid-template-columns:repeat(3,1fr)}}
@@ -1194,13 +1189,21 @@ function renderOpen() {
               <div class="live-bar-track"><div class="live-bar-fill" style="width:${(pct*100).toFixed(1)}%;background:${barColor}"></div></div>
               <span class="live-cur" style="color:${barColor}">${cur}</span><span class="live-line">/${b.line}</span>
             </div>`;
-            const at = live.away_tri || ''; const hs = live.home_score ?? '';
-            const ht = live.home_tri || ''; const as_ = live.away_score ?? '';
-            const scoreStr = (at && ht)
-              ? `${at} <span class="score-num">${as_}</span> · <span class="score-num">${hs}</span> ${ht}${isFinal ? ' <span style="opacity:.5">Final</span>' : ''}`
-              : (isFinal ? '<span style="opacity:.5">Final</span>' : '');
-            const scoreRow = scoreStr ? `<div class="game-score">${scoreStr}</div>` : '';
-            liveHtml = statBar + scoreRow;
+            // Game progress: 4 quarters × 12 min = 2880 s total
+            const period = live.period || 0;
+            const clockSecs = live.clock_secs ?? 0;
+            const Q_SECS = 12 * 60;
+            let gamePct = isFinal ? 100 : 0;
+            if (!isFinal && period > 0) {
+              const elapsed = (period - 1) * Q_SECS + (Q_SECS - clockSecs);
+              gamePct = Math.min(elapsed / (4 * Q_SECS) * 100, 100);
+            }
+            const finalLabel = isFinal ? '<span style="opacity:.5;font-size:.65rem">Final</span>' : '';
+            const gameBar = `<div class="game-bar-wrap">
+              <div class="game-bar-track"><div class="game-bar-fill" style="width:${gamePct.toFixed(1)}%"></div></div>
+              ${finalLabel}
+            </div>`;
+            liveHtml = statBar + gameBar;
           } else {
             liveHtml = `<div class="live-bar-wrap" style="color:var(--muted);font-style:italic">Not Started</div>`;
           }
