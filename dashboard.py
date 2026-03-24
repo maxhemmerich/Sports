@@ -1072,7 +1072,11 @@ function _cancelSettle(trackerIdx) {
 
 function _checkBust(trackerIdx, isBusted) {
   if (isBusted) _scheduleSettle(trackerIdx, 'LOSS', 'busted');
-  else _cancelSettle(trackerIdx);
+  else {
+    // only cancel a busted-reason timer; leave final timers alone
+    const t = _bustTimers[trackerIdx];
+    if (t && t.reason === 'busted' && !t.settling) { clearTimeout(t.tid); delete _bustTimers[trackerIdx]; }
+  }
 }
 
 function _checkFinal(trackerIdx, isFinal, result) {
