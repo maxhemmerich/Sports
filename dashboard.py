@@ -1305,8 +1305,8 @@ function drawChart() {
   // fork starts from full bankroll (tradeable + at-risk), not settled-only
   const forkBase = (_state.full_balance !== undefined && _state.full_balance !== null)
     ? _state.full_balance : lastVal;
-  const gainVal = lastVal + toGain;
-  const lossVal = forkBase;
+  const gainVal = forkBase + toGain;   // win all: current bankroll + winnings
+  const lossVal = forkBase - toLose;   // lose all: current bankroll - stakes (→ $0 if 100% at risk)
 
   // filtered single series (book:fanduel or market:points)
   let filteredVals = null;
