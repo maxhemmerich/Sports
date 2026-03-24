@@ -149,9 +149,10 @@ def _build_state() -> dict:
     chart_values: list[float] = []
     trade_labels: list[str] = []
     trade_pnl: list[float] = []
+    trade_types: list[str] = []  # "bet", "deposit", "withdrawal", "adjustment"
     try:
         # collect per-trade events
-        _events: list[tuple[str, float, str]] = []  # (date, pnl, label)
+        _events: list[tuple[str, float, str, str]] = []  # (date, pnl, label, type)
         if TRACKER_PATH.exists():
             _tr = pd.read_csv(TRACKER_PATH)
             _settled = _tr[_tr["result"].astype(str).str.strip().isin(["WIN", "LOSS", "PUSH"])].copy()
@@ -173,24 +174,28 @@ def _build_state() -> dict:
                     today_pnl += _profit
                 _mkt = str(_r.get("market", "")).replace("player_", "")
                 _lbl = f"{_r.get('player', '')} {_mkt} {_r.get('side', '')} {_r.get('line', '')}".strip()
-                _events.append((_d, round(_profit, 2), _lbl))
-        # merge manual adjustments
+                _events.append((_d, round(_profit, 2), _lbl, "bet"))
+        # merge deposits / withdrawals / adjustments
         if ADJUSTMENTS_PATH.exists():
             _adj = pd.read_csv(ADJUSTMENTS_PATH)
+            if "type" not in _adj.columns:
+                _adj["type"] = "adjustment"
             for _, _r in _adj.iterrows():
                 _d = str(_r.get("date", "")).strip()
                 _amt = float(_r.get("amount", 0) or 0)
                 _note = str(_r.get("note", "Adjustment")).strip() or "Adjustment"
-                _events.append((_d, round(_amt, 2), _note))
+                _kind = str(_r.get("type", "adjustment")).strip() or "adjustment"
+                _events.append((_d, round(_amt, 2), _note, _kind))
         # sort by date and build cumulative series
         _events.sort(key=lambda e: e[0])
         _running = 0.0
-        for _d, _v, _lbl in _events:
+        for _d, _v, _lbl, _kind in _events:
             _running += _v
             chart_dates.append(_d)
             chart_values.append(round(_running, 2))
             trade_labels.append(_lbl)
             trade_pnl.append(_v)
+            trade_types.append(_kind)
     except Exception:
         pass
 
@@ -215,6 +220,7 @@ def _build_state() -> dict:
         "chart_values": chart_values,
         "trade_labels": trade_labels,
         "trade_pnl": trade_pnl,
+        "trade_types": trade_types,
     }
 
 
@@ -586,10 +592,14 @@ def api_adjustment():
     except (TypeError, ValueError):
         return jsonify({"error": "invalid amount"}), 400
     note = str(body.get("note", "")).strip() or "Adjustment"
+    kind = str(body.get("type", "adjustment"))  # "deposit", "withdrawal", or "adjustment"
     d = date.today().isoformat()
-    row = pd.DataFrame([{"date": d, "amount": round(amount, 2), "note": note}])
+    row = pd.DataFrame([{"date": d, "amount": round(amount, 2), "note": note, "type": kind}])
     if ADJUSTMENTS_PATH.exists():
-        row = pd.concat([pd.read_csv(ADJUSTMENTS_PATH), row], ignore_index=True)
+        existing = pd.read_csv(ADJUSTMENTS_PATH)
+        if "type" not in existing.columns:
+            existing["type"] = "adjustment"
+        row = pd.concat([existing, row], ignore_index=True)
     row.to_csv(ADJUSTMENTS_PATH, index=False)
     broadcast_state()
     return jsonify({"ok": True})
@@ -638,9 +648,13 @@ def _fetch_live_stats() -> dict[str, dict]:
     for game in games:
         gid = game.get("gameId", "")
         gstatus = game.get("gameStatus", 1)  # 1=pre, 2=live, 3=final
-        clock = game.get("gameClock", "")
+        _raw_clock = game.get("gameClock", "")
         period = game.get("period", 0)
         status_label = "pre" if gstatus == 1 else ("final" if gstatus == 3 else "live")
+        # parse ISO 8601 duration e.g. "PT05M30.00S" → "5:30"
+        import re as _re
+        _cm = _re.match(r'PT(?:(\d+)M)?(\d+(?:\.\d+)?)S', _raw_clock)
+        clock = f"{int(_cm.group(1) or 0)}:{int(float(_cm.group(2))):02d}" if _cm else _raw_clock
         if gstatus == 1:
             continue  # game hasn't started — no stats yet
         try:
@@ -898,6 +912,24 @@ button:active{opacity:.7}
   </div>
 </section>
 
+<section>
+  <div class="sec-hdr"><span>Deposit / Withdraw</span>
+    <span style="font-size:.72rem;color:var(--muted)">logged with timestamp · does not affect bet P&amp;L</span>
+  </div>
+  <div class="cfg-grid" style="align-items:end">
+    <div class="cfg-item" style="grid-column:1/2"><label>Amount ($)</label>
+      <input type="number" id="dep-amount" step="0.01" min="0.01" placeholder="e.g. 100.00">
+    </div>
+    <div class="cfg-item" style="grid-column:2/4"><label>Note (optional)</label>
+      <input type="text" id="dep-note" placeholder="e.g. Initial deposit, promo bonus">
+    </div>
+  </div>
+  <div class="cfg-foot">
+    <button class="btn-blue"  onclick="logDeposit()">&#8593; Log Deposit</button>
+    <button class="btn-loss"  onclick="logWithdrawal()">&#8595; Log Withdrawal</button>
+  </div>
+</section>
+
 <script>
 let _state = {};
 let _liveStats = {};  // player_name_lower -> {pts, reb, ast, fg3m, blk, stl, tov, status, clock}
@@ -921,7 +953,7 @@ fetch('/api/state').then(r => r.json()).then(d => {
     try { render(d); } catch(err) { console.error('render error:', err); }
     if (d.chart_dates && d.chart_dates.length) {
       _chartDates = d.chart_dates; _chartValues = d.chart_values; _chartMode = 'pnl';
-      _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || [];
+      _tradeLabels = d.trade_labels || []; _tradePnl = d.trade_pnl || []; _tradeTypes = d.trade_types || [];
       const title = $('chart-title'); if (title) title.textContent = 'Cumulative P&L';
     }
   }
@@ -1247,7 +1279,7 @@ async function refreshLines() {
 
 // ── P&L Chart ─────────────────────────────────────────────────────────────────
 let _chartDates = [], _chartValues = [];
-let _tradeLabels = [], _tradePnl = [];
+let _tradeLabels = [], _tradePnl = [], _tradeTypes = [];
 let _chartMode = 'empty';
 let _chartGroups = {};    // { book: {name: [values]}, market: {name: [values]} }
 let _chartGroupDates = []; // date axis for group series (may differ from main dates)
@@ -1308,8 +1340,26 @@ async function submitAdj() {
   const amount = parseFloat($('adj-amount').value);
   if (isNaN(amount)) { alert('Enter a valid amount'); return; }
   const note = $('adj-note').value.trim();
-  await apiFetch('/api/adjustment', {amount, note});
+  await apiFetch('/api/adjustment', {amount, note, type: 'adjustment'});
   hideAdjModal();
+}
+async function logDeposit() {
+  const amount = parseFloat($('dep-amount').value);
+  if (isNaN(amount) || amount <= 0) { alert('Enter a positive amount'); return; }
+  const note = ($('dep-note').value.trim()) || 'Deposit';
+  if (await post('/api/adjustment', {amount, note, type: 'deposit'})) {
+    $('dep-amount').value = ''; $('dep-note').value = '';
+    await loadChart();
+  }
+}
+async function logWithdrawal() {
+  const amount = parseFloat($('dep-amount').value);
+  if (isNaN(amount) || amount <= 0) { alert('Enter a positive amount'); return; }
+  const note = ($('dep-note').value.trim()) || 'Withdrawal';
+  if (await post('/api/adjustment', {amount: -amount, note, type: 'withdrawal'})) {
+    $('dep-amount').value = ''; $('dep-note').value = '';
+    await loadChart();
+  }
 }
 async function loadChart() {
   try {
@@ -1452,6 +1502,26 @@ function drawChart() {
     ctx.setLineDash([]);
     vals.forEach((v, i) => i === 0 ? ctx.moveTo(toX(i), toY(v)) : ctx.lineTo(toX(i), toY(v)));
     ctx.stroke();
+  }
+
+  // deposit / withdrawal vertical markers (only on main series, not filtered view)
+  if (!filteredVals) {
+    ctx.save();
+    ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+    _tradeTypes.forEach((typ, i) => {
+      if (typ !== 'deposit' && typ !== 'withdrawal') return;
+      const x = toX(i);
+      const color = typ === 'deposit' ? '#58a6ff' : '#d29922';
+      ctx.setLineDash([3, 3]);
+      ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, pad.top + ch); ctx.stroke();
+      // arrow + amount label at top
+      const amt = _tradePnl[i];
+      const sign = amt >= 0 ? '+' : '';
+      ctx.fillStyle = color;
+      ctx.fillText(`${sign}$${Math.abs(amt).toFixed(0)}`, x, pad.top + 9);
+    });
+    ctx.restore();
   }
 
   if (hasFork) {
