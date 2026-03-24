@@ -163,6 +163,8 @@ def _build_state() -> dict:
                 _amt = _sf(_r.get("entered_$", 0))
                 _odds = _sf(_r.get("odds", 0))
                 _d = str(_r.get("date", "")).strip()
+                # use settled_date for today's P&L if available, else fall back to bet date
+                _sd = str(_r.get("settled_date", "")).strip() or _d
                 if _res == "WIN":
                     _profit = _amt * (_odds / 100) if _odds > 0 else (_amt * (100 / abs(_odds)) if _odds != 0 else 0.0)
                 elif _res == "LOSS":
@@ -170,7 +172,7 @@ def _build_state() -> dict:
                 else:
                     _profit = 0.0
                 overall_pnl += _profit
-                if _d == _today:
+                if _sd == _today:
                     today_pnl += _profit
                 _mkt = str(_r.get("market", "")).replace("player_", "")
                 _lbl = f"{_r.get('player', '')} {_mkt} {_r.get('side', '')} {_r.get('line', '')}".strip()
@@ -547,6 +549,7 @@ def api_settle():
     book = str(row.get("bookmaker", "")).lower()
 
     df.at[idx, "result"] = result
+    df.at[idx, "settled_date"] = date.today().isoformat()
     df.to_csv(TRACKER_PATH, index=False)
 
     dec = _american_to_decimal(odds)

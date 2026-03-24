@@ -578,6 +578,7 @@ def auto_settle_bets(already_reported: set | None = None) -> list[str]:
             result = "PUSH"
 
         df.at[orig_idx, "result"] = result
+        df.at[orig_idx, "settled_date"] = date.today().isoformat()
 
         book = str(row.get("bookmaker", "")).lower()
         stake = float(row.get("entered_$", 0))
