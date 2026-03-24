@@ -295,8 +295,9 @@ def sse():
                 break
 
     resp = Response(stream_with_context(generate()), mimetype="text/event-stream")
-    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["Cache-Control"] = "no-cache, no-store"
     resp.headers["X-Accel-Buffering"] = "no"
+    resp.headers["Connection"] = "keep-alive"
     return resp
 
 
@@ -766,13 +767,32 @@ def start_dashboard(shared_st: dict, shared_lock: threading.Lock, port: int = 50
         local_ip = "127.0.0.1"
 
     print(f"[dashboard] http://localhost:{port}  |  http://{local_ip}:{port}", flush=True)
-    print(f"[dashboard] Remote: ngrok http {port}", flush=True)
 
     t = threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False),
         daemon=True,
     )
     t.start()
+
+    # Auto-launch cloudflared tunnel and print the public URL when found
+    import shutil, subprocess, re as _re
+    if shutil.which("cloudflared"):
+        def _tunnel():
+            try:
+                proc = subprocess.Popen(
+                    ["cloudflared", "tunnel", "--url", f"http://localhost:{port}"],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                )
+                for line in proc.stdout:
+                    m = _re.search(r"https://[a-z0-9\-]+\.trycloudflare\.com", line)
+                    if m:
+                        print(f"[dashboard] Public URL: {m.group(0)}", flush=True)
+                        break
+            except Exception as _e:
+                print(f"[dashboard] cloudflared tunnel failed: {_e}", flush=True)
+        threading.Thread(target=_tunnel, daemon=True).start()
+    else:
+        print(f"[dashboard] Remote: cloudflared tunnel --url http://localhost:{port}", flush=True)
 
 
 # ── Embedded HTML ─────────────────────────────────────────────────────────────
