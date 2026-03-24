@@ -235,8 +235,8 @@ def add_defense_features(df: pd.DataFrame, def_lookup: pd.DataFrame) -> pd.DataF
 
 def add_pace_proxy(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Proxy pace as player's rolling FGA per game (personal volume indicator).
-    Higher FGA ~ more usage ~ more scoring opportunities.
+    Add rolling FGA and usage_pct (player FGA / team FGA) per player.
+    usage_pct captures the player's role share independent of team pace.
     """
     df = df.sort_values(["player_id", "game_date"]).copy()
     if "fga" in df.columns:
@@ -246,6 +246,19 @@ def add_pace_proxy(df: pd.DataFrame) -> pd.DataFrame:
         )
     else:
         df["roll_fga_10"] = 0.0
+
+    # usage_pct: player's share of their team's FGA
+    pace_lookup = build_pace_lookup()
+    if not pace_lookup.empty and "team_abbreviation" in df.columns:
+        df = df.merge(
+            pace_lookup.rename(columns={"team_avg_fga": "_team_fga"}),
+            on="team_abbreviation", how="left"
+        )
+        df["_team_fga"] = df["_team_fga"].fillna(85.0)
+        df["usage_pct"] = df["roll_fga_10"] / df["_team_fga"] * 100
+        df = df.drop(columns=["_team_fga"], errors="ignore")
+    else:
+        df["usage_pct"] = 0.0
     return df
 
 
@@ -329,6 +342,7 @@ _CONTEXT_COLS = [
     "is_home",
     "travel_km",
     "roll_fga_10",
+    "usage_pct",             # player FGA / team FGA — role signal independent of pace
     "roll_min_5",            # recent minutes — strongest usage proxy
     "roll_min_10",
     "ewm_min_10",
@@ -542,10 +556,18 @@ def build_live_features(
     # Opponent team pace (avg FGA per game — higher = faster pace = more possessions)
     pace_lookup = build_pace_lookup()
     opp_team_pace = 85.0  # league avg fallback
+    player_team_fga = 85.0  # fallback for usage calculation
     if not pace_lookup.empty and "team_abbreviation" in pace_lookup.columns:
         opp_row = pace_lookup[pace_lookup["team_abbreviation"] == opponent_team_abbr]
         if not opp_row.empty:
             opp_team_pace = float(opp_row["team_avg_fga"].iloc[0])
+        player_team = str(player_df.iloc[-1].get("team_abbreviation", ""))
+        own_row = pace_lookup[pace_lookup["team_abbreviation"] == player_team]
+        if not own_row.empty:
+            player_team_fga = float(own_row["team_avg_fga"].iloc[0])
+
+    # Usage rate: player's share of team FGA (role signal independent of team pace)
+    usage_pct = (roll_fga_10 / player_team_fga * 100) if player_team_fga > 0 else 0.0
 
     # Player's historical avg vs this specific opponent — EWM so recent games matter more
     vs_opp_avg = ewm10  # fallback: recency-weighted overall mean
@@ -575,6 +597,7 @@ def build_live_features(
         "is_home":               int(is_home),
         "travel_km":             travel_km,
         "roll_fga_10":           roll_fga_10,
+        "usage_pct":             usage_pct,
         "roll_min_5":            roll_min_5,
         "roll_min_10":           roll_min_10,
         "ewm_min_10":            ewm_min_10,

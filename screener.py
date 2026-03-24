@@ -51,6 +51,7 @@ MIN_LINE_DIFF = float(os.getenv("MIN_LINE_DIFF", "1.5"))  # minimum |pred - line
 MAX_KELLY_FRACTION = float(os.getenv("MAX_KELLY_FRACTION", "0.05"))  # cap at 5% per bet
 MAX_TOTAL_EXPOSURE = float(os.getenv("MAX_TOTAL_EXPOSURE", "1.0"))  # max total bankroll % across all bets
 MAX_BETS = int(os.getenv("MAX_BETS", "20"))            # max bets to show/recommend (top N by edge)
+MAX_BETS_PER_PLAYER = int(os.getenv("MAX_BETS_PER_PLAYER", "2"))  # max props per player (0 = no limit)
 MIN_GAMES = int(os.getenv("MIN_GAMES", "20"))           # min career games in DB before flagging
 MIN_SEASON_GAMES = int(os.getenv("MIN_SEASON_GAMES", "15"))  # min games in current season (Oct–present)
 CURRENT_SEASON_START = "2025-10-01"
@@ -484,6 +485,15 @@ def run_screener(
 
     bets_df = pd.DataFrame(results).sort_values("edge_pct", ascending=False).reset_index(drop=True)
 
+    # Per-player cap: take top N props per player by edge (prevents correlated loss)
+    if MAX_BETS_PER_PLAYER > 0:
+        bets_df = (
+            bets_df.groupby("player", group_keys=False)
+            .apply(lambda g: g.head(MAX_BETS_PER_PLAYER), include_groups=False)
+            .sort_values("edge_pct", ascending=False)
+            .reset_index(drop=True)
+        )
+
     # Cap to top N bets FIRST so scaling is based only on shown bets
     if MAX_BETS > 0:
         bets_df = bets_df.head(MAX_BETS).reset_index(drop=True)
@@ -543,12 +553,26 @@ def auto_settle_bets(already_reported: set | None = None) -> list[str]:
 
     try:
         import contextlib as _cl, io as _io
-        from data import load_gamelogs
+        from data import load_gamelogs, fetch_player_gamelogs, CURRENT_SEASON, DATA_DIR
         _buf = _io.StringIO()
         with _cl.redirect_stdout(_buf):
             logs = load_gamelogs()
         logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
         logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
+
+        # If any past bets are still missing from the loaded logs, the cache may be
+        # stale (games finished after the last refresh). Force-refresh the current
+        # season once and reload.
+        past_dates = set(past["date"].astype(str))
+        logged_dates = {str(d) for d in logs["game_date"]}
+        if past_dates - logged_dates:
+            cache_path = DATA_DIR / f"gamelogs_{CURRENT_SEASON.replace('-', '_')}.csv"
+            if cache_path.exists():
+                cache_path.unlink()
+            with _cl.redirect_stdout(_buf):
+                logs = load_gamelogs()
+            logs["game_date"] = pd.to_datetime(logs["game_date"]).dt.date
+            logs["player_name_lower"] = logs["player_name"].str.lower().str.strip()
     except Exception as e:
         return [f"[auto-settle] Could not load game logs: {e}"]
 
