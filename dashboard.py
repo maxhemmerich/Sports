@@ -1343,7 +1343,18 @@ function drawChart() {
   const forkTipX = pad.left + cw;
 
   const displayVals = filteredVals || chartVals;
-  const allVals = hasFork ? [...displayVals, forkBase, gainVal, lossVal] : displayVals;
+
+  // linear regression over history to extrapolate trend into the fork
+  let trendVal = forkBase;
+  if (hasFork && chartVals.length >= 2) {
+    const nn = chartVals.length;
+    let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+    for (let i = 0; i < nn; i++) { sx += i; sy += chartVals[i]; sxy += i * chartVals[i]; sx2 += i * i; }
+    const slope = (nn * sxy - sx * sy) / (nn * sx2 - sx * sx) || 0;
+    trendVal = Math.max(lossVal, Math.min(gainVal, forkBase + slope));
+  }
+
+  const allVals = hasFork ? [...displayVals, forkBase, gainVal, lossVal, trendVal] : displayVals;
   const min = Math.min(deposit, ...allVals), max = Math.max(deposit, ...allVals);
   const range = max - min || 1;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
@@ -1417,6 +1428,12 @@ function drawChart() {
     // loss branch (red dashed)
     ctx.strokeStyle = '#f85149';
     ctx.beginPath(); ctx.moveTo(forkX, originY); ctx.lineTo(tipX, lossY); ctx.stroke();
+
+    // trend extrapolation (white dashed, between gain and loss)
+    const trendY = toY(trendVal);
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(forkX, originY); ctx.lineTo(tipX, trendY); ctx.stroke();
     ctx.restore();
 
     // tip labels — show absolute balance at each outcome
@@ -1425,6 +1442,8 @@ function drawChart() {
     ctx.fillText('$' + gainVal.toFixed(0), tipX + 4, gainY + 4);
     ctx.fillStyle = '#f85149';
     ctx.fillText('$' + lossVal.toFixed(0),  tipX + 4, lossY + 4);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillText('$' + trendVal.toFixed(0), tipX + 4, trendY + 4);
 
     // "Today" x-axis label at fork tip
     ctx.fillStyle = '#8b949e'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
