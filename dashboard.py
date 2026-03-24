@@ -508,8 +508,10 @@ def api_place():
         return jsonify({"error": "bet not found in current list"}), 404
 
     row = row_df.iloc[0]
+    _ct = str(row.get("commence_time", "") or "").strip()
+    _game_date = _ct[:10] if len(_ct) >= 10 else date.today().isoformat()
     entry = {
-        "date": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        "date": _game_date,
         "player": row["player"],
         "market": row.get("market", ""),
         "line": row["line"],

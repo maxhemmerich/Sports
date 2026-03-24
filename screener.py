@@ -908,16 +908,17 @@ def _log_slip(bets_df: pd.DataFrame, raw: str) -> None:
         return
 
     logged = []
-    today = date.today().isoformat()
     for row_num, entered in sorted(slip.items()):
         idx = row_num - 1
         if idx < 0 or idx >= len(bets_df):
             print(f"  [skip] Row {row_num} out of range.", flush=True)
             continue
         row = bets_df.iloc[idx]
+        _ct = str(row.get("commence_time", "") or "").strip()
+        _game_date = _ct[:10] if len(_ct) >= 10 else date.today().isoformat()
         print(f"  {row['player']} | {row.get('market','').replace('player_','')} | {row['side']} {row['line']} @ {int(row['odds']):+d} — ${entered:.0f}", flush=True)
         logged.append({
-            "date": today,
+            "date": _game_date,
             "player": row["player"],
             "market": row.get("market", ""),
             "line": row["line"],
