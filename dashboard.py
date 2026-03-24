@@ -364,7 +364,7 @@ def api_pnl_debug():
 
 @app.route("/api/pnl_history")
 def api_pnl_history():
-    from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT
+    from screener import TRACKER_PATH, BALANCE_LOG_PATH, DEPOSIT, ADJUSTMENTS_PATH
 
     # ── Try settled-bet cumulative PnL first (one point per trade) ───────────
     def _row_pnl(row):
@@ -378,8 +378,8 @@ def api_pnl_history():
         return 0.0
 
     group_labels: dict[str, list[str]] = {"book": [], "market": []}
-    # per-trade data: list of (date_label, pnl, book_key, market_key)
-    trades: list[tuple[str, float, str, str]] = []
+    # per-trade data: list of (sort_key, date_label, pnl, book_key, market_key, trade_type, raw_label)
+    trades: list[tuple[str, str, float, str, str, str, str]] = []
 
     if TRACKER_PATH.exists():
         try:
@@ -407,26 +407,50 @@ def api_pnl_history():
                 mk = mk.replace("player_", "", 1) if mk.startswith("player_") else mk
                 if not bk or bk == "nan": bk = "unknown"
                 if not mk or mk == "nan": mk = "unknown"
-                trades.append((label, pnl, bk, mk))
+                mkt_s = str(row.get("market", "")).replace("player_", "")
+                raw_lbl = f"{row.get('player', '')} {mkt_s} {row.get('side', '')} {row.get('line', '')}".strip()
+                trades.append((d, label, pnl, bk, mk, "bet", raw_lbl))
         except Exception:
             import traceback; traceback.print_exc()
 
+    # merge deposits / withdrawals / adjustments into the series
+    if ADJUSTMENTS_PATH.exists():
+        try:
+            _adj = pd.read_csv(ADJUSTMENTS_PATH)
+            if "type" not in _adj.columns:
+                _adj["type"] = "adjustment"
+            for _, _r in _adj.iterrows():
+                _d = str(_r.get("date", "")).strip()
+                _amt = float(_r.get("amount", 0) or 0)
+                _note = str(_r.get("note", "Adjustment")).strip() or "Adjustment"
+                _kind = str(_r.get("type", "adjustment")).strip() or "adjustment"
+                trades.append((_d, _d, round(_amt, 2), "__adj__", "__adj__", _kind, _note))
+        except Exception:
+            pass
+
+    # sort by date (stable: bets within a day stay in CSV order, adjustments sort by date)
+    trades.sort(key=lambda t: t[0])
+
     if trades:
-        labels = [t[0] for t in trades]
+        labels = [t[1] for t in trades]
+        trade_types = [t[5] for t in trades]
+        trade_pnl_list = [t[2] for t in trades]
+        trade_labels_list = [t[6] for t in trades]
         # cumulative all-trades
         running = 0.0
         values = []
-        for _, pnl, _, _ in trades:
-            running += pnl
+        for t in trades:
+            running += t[2]
             values.append(round(running, 2))
         # per-group cumulative series (same length, 0 for trades not in group)
         def _group_series(gk, name):
             r = 0.0
             out = []
-            for _, pnl, bk, mk in trades:
+            for t in trades:
+                bk, mk = t[3], t[4]
                 key = bk if gk == "book" else mk
                 if key == name:
-                    r += pnl
+                    r += t[2]
                 out.append(round(r, 2))
             return out
 
@@ -434,7 +458,10 @@ def api_pnl_history():
         for gk in ("book", "market"):
             groups[gk] = {name: _group_series(gk, name) for name in group_labels[gk]}
 
-        return jsonify({"dates": labels, "values": values, "mode": "pnl", "groups": groups})
+        return jsonify({
+            "dates": labels, "values": values, "mode": "pnl", "groups": groups,
+            "trade_types": trade_types, "trade_pnl": trade_pnl_list, "trade_labels": trade_labels_list,
+        })
 
     # ── Fall back to balance log (shows total balance over time) ──────────────
     if BALANCE_LOG_PATH.exists():
@@ -1373,6 +1400,9 @@ async function loadChart() {
     _chartMode = d.mode || 'empty';
     _chartGroups = d.groups || {};
     _chartGroupDates = d.group_dates || d.dates || [];
+    if (d.trade_types) _tradeTypes = d.trade_types;
+    if (d.trade_pnl)   _tradePnl   = d.trade_pnl;
+    if (d.trade_labels) _tradeLabels = d.trade_labels;
     _populateChartDropdown();
     const title = $('chart-title');
     if (title) title.textContent = _chartMode === 'balance' ? 'Balance vs Deposit' : 'Cumulative P&L';
