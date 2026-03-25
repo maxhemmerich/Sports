@@ -551,6 +551,22 @@ def run_screener(
     else:
         bets_df["parlay_note"] = ""
 
+    # Drop bets for games that have already started — lines cache can be up to
+    # LINES_REFRESH_SECS (30 min) stale, so games may have tipped off since last fetch.
+    # Placing a bet on a live/finished game causes the auto-settle to trigger immediately.
+    if "commence_time" in bets_df.columns:
+        _now_utc = datetime.now(timezone.utc)
+        def _already_started(ct: str) -> bool:
+            try:
+                return datetime.fromisoformat(str(ct).replace("Z", "+00:00")) <= _now_utc
+            except Exception:
+                return False
+        started_mask = bets_df["commence_time"].apply(_already_started)
+        n_started = started_mask.sum()
+        if n_started:
+            print(f"[screener] Dropped {n_started} bet(s) — game(s) already started.")
+            bets_df = bets_df[~started_mask].reset_index(drop=True)
+
     # Cap to top N bets FIRST so scaling is based only on shown bets
     if MAX_BETS > 0:
         bets_df = bets_df.head(MAX_BETS).reset_index(drop=True)

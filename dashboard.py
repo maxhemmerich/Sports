@@ -741,6 +741,7 @@ def _fetch_live_stats() -> dict[str, dict]:
         _raw_clock = game.get("gameClock", "")
         period = game.get("period", 0)
         status_label = "pre" if gstatus == 1 else ("final" if gstatus == 3 else "live")
+        game_date = (game.get("gameDateEst", "") or "")[:10]  # "YYYY-MM-DD" local date
         import re as _re
         _cm = _re.match(r'PT(?:(\d+)M)?(\d+(?:\.\d+)?)S', _raw_clock)
         # seconds remaining in this quarter
@@ -774,6 +775,7 @@ def _fetch_live_stats() -> dict[str, dict]:
                     "tov":  s.get("turnovers", 0),
                     "status": status_label,
                     "period": period, "clock_secs": clock_secs,
+                    "game_date": game_date,
                 }
     return result
 
@@ -1183,6 +1185,10 @@ function renderPot() {
     const sideClass = b.side === 'OVER' ? 'over' : 'under';
     const loadBadge = b.load_mgmt_risk ? '<span style="font-size:.64rem;background:rgba(210,153,34,.18);color:var(--yellow);border-radius:4px;padding:1px 5px;margin-left:2px" title="April game — possible load management">rest risk</span>' : '';
     const parlayBadge = b.parlay_note ? `<div style="font-size:.67rem;color:var(--muted);margin-top:3px" title="Correlated leg — consider parlay">&#x1F517; parlay w/ ${b.parlay_note}</div>` : '';
+    // Warn if game is already live (screener lines cache can lag up to 30 min)
+    const playerLive = _liveStats[(b.player||'').toLowerCase()];
+    const gameActive = playerLive && (playerLive.status === 'live' || playerLive.status === 'final');
+    const liveBadge = gameActive ? '<div style="font-size:.67rem;color:var(--red);margin-top:2px">&#9888; Game already in progress — bet with caution</div>' : '';
     return `<div class="pot-tile">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <span class="player">${b.player}</span>
@@ -1192,7 +1198,7 @@ function renderPot() {
         ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
         ${cap(b.bookmaker)} · pred: ${b.prediction}<br>
         <span style="color:var(--muted);font-size:.67rem">${b.game}</span>
-      </div>${parlayBadge}
+      </div>${parlayBadge}${liveBadge}
       <div class="actions">
         $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
         <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
@@ -1220,7 +1226,12 @@ function renderOpen() {
         <div class="open-tile-grid">` +
         bets.map(b => {
           const sideClass = b.side === 'OVER' ? 'over' : 'under';
-          const live = _liveStats[(b.player||'').toLowerCase()];
+          let live = _liveStats[(b.player||'').toLowerCase()];
+          // Guard against back-to-back: ignore live stats from a different game date
+          // (yesterday's final shows up in todaysScoreboard for back-to-back players)
+          if (live && live.game_date && b.date && live.game_date !== b.date) {
+            live = undefined;
+          }
           const statKey = _MKT_STAT[b.market] || b.market;
           let liveHtml = '';
           let busted = false;
