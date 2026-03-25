@@ -250,7 +250,7 @@ def _build_state() -> dict:
 def broadcast_state() -> None:
     """Push current state to all connected SSE clients."""
     try:
-        data = _build_state()
+        data = _sanitize_json(_build_state())
     except Exception:
         return
     dead = []
@@ -273,10 +273,24 @@ def index():
     return _HTML
 
 
+def _sanitize_json(obj):
+    """Recursively replace float NaN/Inf with 0.0 so json.dumps never emits bare NaN."""
+    if isinstance(obj, float):
+        return 0.0 if (obj != obj or obj == float("inf") or obj == float("-inf")) else obj
+    if isinstance(obj, dict):
+        return {k: _sanitize_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_json(v) for v in obj]
+    return obj
+
+
 @app.route("/api/state")
 def api_state():
     try:
-        return jsonify(_build_state())
+        state = _build_state()
+        # Validate: json.dumps with allow_nan=False raises ValueError on NaN/Inf
+        # so we sanitize first rather than silently emitting invalid JSON.
+        return jsonify(_sanitize_json(state))
     except Exception as e:
         print(f"[dashboard] /api/state error: {e}", flush=True)
         import traceback; traceback.print_exc()
@@ -299,7 +313,7 @@ def sse():
         yield ": " + "x" * 4096 + "\n\n"
         # initial snapshot
         try:
-            yield f"data: {json.dumps(_build_state())}\n\n"
+            yield f"data: {json.dumps(_sanitize_json(_build_state()))}\n\n"
         except Exception as _e:
             import traceback
             print(f"[dashboard] SSE init error: {_e}", flush=True)
