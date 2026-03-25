@@ -157,6 +157,8 @@ def _build_state() -> dict:
                     "game": str(row.get("game", "")),
                     "skipped": key in skipped,
                     "placed": key in placed,
+                    "load_mgmt_risk": bool(row.get("load_mgmt_risk", False)),
+                    "parlay_note": str(row.get("parlay_note", "") or ""),
                 })
             except Exception:
                 pass
@@ -936,7 +938,12 @@ button:active{opacity:.7}
   <div class="sec-hdr">
     <span id="chart-title">Cumulative P&amp;L</span>
     <span id="chart-range" style="font-size:.72rem;color:var(--muted)"></span>
-    <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
+    <div style="display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap">
+      <div id="chart-zoom-btns" style="display:flex;gap:3px">
+        <button class="chart-tog" onclick="setChartWindow('today')" style="font-size:.68rem;padding:2px 7px">Today</button>
+        <button class="chart-tog" onclick="setChartWindow('7d')" style="font-size:.68rem;padding:2px 7px">7D</button>
+        <button class="chart-tog active" onclick="setChartWindow('all')" style="font-size:.68rem;padding:2px 7px">All</button>
+      </div>
       <select id="chart-filter" onchange="setChartGroup(this.value)" style="font-size:.7rem;padding:2px 6px;border-radius:4px;border:1px solid var(--border);background:var(--card);color:var(--fg);cursor:pointer">
         <option value="all">All trades</option>
       </select>
@@ -1174,16 +1181,18 @@ function renderPot() {
     const sid = safeId(b.key);
     const keyAttr = JSON.stringify(b.key).replace(/"/g, '&quot;');
     const sideClass = b.side === 'OVER' ? 'over' : 'under';
+    const loadBadge = b.load_mgmt_risk ? '<span style="font-size:.64rem;background:rgba(210,153,34,.18);color:var(--yellow);border-radius:4px;padding:1px 5px;margin-left:2px" title="April game — possible load management">rest risk</span>' : '';
+    const parlayBadge = b.parlay_note ? `<div style="font-size:.67rem;color:var(--muted);margin-top:3px" title="Correlated leg — consider parlay">&#x1F517; parlay w/ ${b.parlay_note}</div>` : '';
     return `<div class="pot-tile">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <span class="player">${b.player}</span>
-        <span class="edge">${b.edge_pct}% edge</span>
+        <span class="edge">${b.edge_pct}% edge</span>${loadBadge}
       </div>
       <div class="tile-meta">
         ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
         ${cap(b.bookmaker)} · pred: ${b.prediction}<br>
         <span style="color:var(--muted);font-size:.67rem">${b.game}</span>
-      </div>
+      </div>${parlayBadge}
       <div class="actions">
         $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
         <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
@@ -1425,10 +1434,47 @@ let _chartMode = 'empty';
 let _chartGroups = {};    // { book: {name: [values]}, market: {name: [values]} }
 let _chartGroupDates = []; // date axis for group series (may differ from main dates)
 let _chartFilter = 'all'; // 'all' | 'book:fanduel' | 'market:points' etc.
+let _chartWindow = 'all'; // 'today' | '7d' | 'all'
 
 function setChartGroup(val) {
   _chartFilter = val;
   drawChart();
+}
+
+function setChartWindow(w) {
+  _chartWindow = w;
+  document.querySelectorAll('#chart-zoom-btns .chart-tog').forEach(b =>
+    b.classList.toggle('active', b.getAttribute('onclick').includes("'" + w + "'")));
+  drawChart();
+}
+
+// Returns {dates, values, depositLine, tradeTypes, tradePnl, tradeLabels}
+// sliced to the current _chartWindow, with cumulative values rebased to window start.
+function _applyWindow(dates, values, depLine, ttypes, tpnl, tlabels) {
+  if (_chartWindow === 'all' || !dates.length) {
+    return {dates, values, depLine, ttypes, tpnl, tlabels};
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  let cutoff;
+  if (_chartWindow === 'today') {
+    cutoff = today;
+  } else { // '7d'
+    const d = new Date();
+    d.setDate(d.getDate() - 6);
+    cutoff = d.toISOString().slice(0, 10);
+  }
+  let startIdx = dates.findIndex(d => d >= cutoff);
+  if (startIdx < 0) startIdx = dates.length;
+  // rebase cumulative so the window starts at 0 relative P&L
+  const base = startIdx > 0 ? values[startIdx - 1] : 0;
+  return {
+    dates:    dates.slice(startIdx),
+    values:   values.slice(startIdx).map(v => v - base),
+    depLine:  depLine.slice(startIdx),
+    ttypes:   ttypes.slice(startIdx),
+    tpnl:     tpnl.slice(startIdx),
+    tlabels:  tlabels.slice(startIdx),
+  };
 }
 
 function _populateChartDropdown() {
@@ -1546,12 +1592,20 @@ function drawChart() {
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
 
-  const toGain = (_state.to_gain || 0);
-  const toLose = (_state.to_lose || 0);
-  const deposit = _state.deposit || 0;
-  const n = _chartValues.length; // always use main series length for layout
+  // Apply time-window filter (Today / 7D / All) before any rendering
+  const _w = _applyWindow(_chartDates, _chartValues, _depositLine, _tradeTypes, _tradePnl, _tradeLabels);
+  const activeDatesW  = _w.dates;
+  const activeValuesW = _w.values;
+  const activeDepLine = _w.depLine;
+  const activeTypes   = _w.ttypes;
+  const activePnl     = _w.tpnl;
+
+  const toGain = (_chartWindow === 'all') ? (_state.to_gain || 0) : 0;
+  const toLose = (_chartWindow === 'all') ? (_state.to_lose || 0) : 0;
+  const deposit = (_chartWindow === 'all') ? (_state.deposit || 0) : 0;
+  const n = activeValuesW.length; // always use main series length for layout
   // offset all historical values by deposit so chart starts at deposit level
-  const chartVals = _chartValues.map(v => v + deposit);
+  const chartVals = activeValuesW.map(v => v + deposit);
   const lastVal = chartVals[n - 1];
   // fork starts from full bankroll (tradeable + at-risk), not settled-only
   const forkBase = (_state.full_balance !== undefined && _state.full_balance !== null)
@@ -1581,7 +1635,7 @@ function drawChart() {
     }
   }
 
-  const activeDates = filteredDates || _chartDates;
+  const activeDates = filteredDates || activeDatesW;
   const hasFork = !filteredVals && (toGain > 0 || toLose > 0);
   const pad = {top:12, right: hasFork ? 58 : 12, bottom:28, left:52};
   const cw = W - pad.left - pad.right;
@@ -1605,7 +1659,7 @@ function drawChart() {
   }
 
   const allVals = hasFork ? [...displayVals, forkBase, gainVal, lossVal, trendVal] : displayVals;
-  const depLineVals = (!filteredVals && _depositLine.length === _chartValues.length) ? _depositLine : [];
+  const depLineVals = (!filteredVals && activeDepLine.length === activeValuesW.length) ? activeDepLine : [];
   const min = Math.min(deposit, ...allVals, ...depLineVals), max = Math.max(deposit, ...allVals, ...depLineVals);
   const range = max - min || 1;
   const toY = v => pad.top  + ch - ((v - min) / range) * ch;
@@ -1631,14 +1685,14 @@ function drawChart() {
   });
 
   // faint cumulative-deposit line (total capital put in)
-  if (!filteredVals && _depositLine.length === _chartValues.length && _depositLine.length > 1) {
+  if (!filteredVals && activeDepLine.length === activeValuesW.length && activeDepLine.length > 1) {
     ctx.save();
     ctx.strokeStyle = 'rgba(139,148,158,0.35)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 4]);
     ctx.lineJoin = 'round';
     ctx.beginPath();
-    _depositLine.forEach((v, i) => {
+    activeDepLine.forEach((v, i) => {
       const x = toX(i), y = toY(v);
       i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
     });
@@ -1670,11 +1724,11 @@ function drawChart() {
   if (!filteredVals) {
     ctx.save();
     ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-    _tradeTypes.forEach((typ, i) => {
+    activeTypes.forEach((typ, i) => {
       if (typ !== 'deposit' && typ !== 'withdrawal') return;
       const x = toX(i);
       const color = typ === 'deposit' ? '#58a6ff' : '#d29922';
-      const amt = _tradePnl[i];
+      const amt = activePnl[i];
       const sign = amt >= 0 ? '+' : '';
       ctx.fillStyle = color;
       ctx.fillText(`${sign}$${Math.abs(amt).toFixed(0)}`, x, pad.top + 9);

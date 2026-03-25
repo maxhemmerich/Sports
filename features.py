@@ -352,6 +352,7 @@ _CONTEXT_COLS = [
     "roll_min_5",            # recent minutes — strongest usage proxy
     "roll_min_10",
     "ewm_min_10",
+    "min_trend",             # roll_min_5 / roll_min_20 — detects role changes (injury/trade)
 ]
 
 FEATURE_COLS = [
@@ -453,6 +454,12 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     df = add_defense_features(df, def_lookup)
     df = add_opp_pace(df, pace_lookup)
     df = add_vs_opponent_features(df)
+
+    # Role-change signal: recent minutes vs longer-term average
+    if "roll_min_5" in df.columns and "roll_min_20" in df.columns:
+        df["min_trend"] = df["roll_min_5"] / (df["roll_min_20"] + 0.1)
+    else:
+        df["min_trend"] = 1.0
 
     # Drop rows without enough history (first few games per player)
     df = df.dropna(subset=["roll_pts_5", TARGET_COL])
@@ -560,11 +567,13 @@ def build_live_features(
     # Minutes played — strongest usage proxy for all counting stats
     roll_min_5 = float("nan")
     roll_min_10 = float("nan")
+    roll_min_20 = float("nan")
     ewm_min_10 = float("nan")
     if "min" in player_df.columns:
         min_series = player_df["min"].apply(_parse_minutes)
         roll_min_5  = float(min_series.tail(5).mean())
         roll_min_10 = float(min_series.tail(10).mean())
+        roll_min_20 = float(min_series.tail(20).mean())
         ewm_min_10  = float(min_series.ewm(span=10, min_periods=1).mean().iloc[-1])
 
     # Opponent team pace (avg FGA per game — higher = faster pace = more possessions)
@@ -617,6 +626,9 @@ def build_live_features(
         "roll_min_5":            roll_min_5,
         "roll_min_10":           roll_min_10,
         "ewm_min_10":            ewm_min_10,
+        "min_trend":             (roll_min_5 / (roll_min_20 + 0.1))
+                                 if not (pd.isna(roll_min_5) or pd.isna(roll_min_20))
+                                 else 1.0,
     }
 
 

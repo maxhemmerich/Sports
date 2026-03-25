@@ -69,6 +69,7 @@ LOOP_PRINT_EVERY = int(os.getenv("LOOP_PRINT_EVERY", "5"))     # print timestamp
 LINES_REFRESH_SECS = int(os.getenv("LINES_REFRESH_SECS", "1800"))  # re-fetch odds API every 30 min
 
 # Scoring distribution std dev per market — used to convert prediction gap → win probability.
+# These are fallbacks; empirical OOS sigma (stored on model as residual_sigma_) takes precedence.
 SIGMA_BY_MARKET = {
     "player_points":    5.0,
     "player_rebounds":  2.5,
@@ -78,6 +79,22 @@ SIGMA_BY_MARKET = {
     "player_steals":    0.8,
     "player_turnovers": 1.2,
 }
+
+# Per-market minimum edge % thresholds.
+# Points props are the most efficient market (most bettor attention, sharp lines).
+# Thin markets (blocks, steals) are less efficient — lower edge is still meaningful.
+MARKET_MIN_EDGE: dict[str, float] = {
+    "player_points":    float(os.getenv("MIN_EDGE_PCT_POINTS",    "6.0")),
+    "player_rebounds":  float(os.getenv("MIN_EDGE_PCT_REBOUNDS",  "5.0")),
+    "player_assists":   float(os.getenv("MIN_EDGE_PCT_ASSISTS",   "5.0")),
+    "player_threes":    float(os.getenv("MIN_EDGE_PCT_THREES",    "5.0")),
+    "player_blocks":    float(os.getenv("MIN_EDGE_PCT_BLOCKS",    "4.0")),
+    "player_steals":    float(os.getenv("MIN_EDGE_PCT_STEALS",    "4.0")),
+    "player_turnovers": float(os.getenv("MIN_EDGE_PCT_TURNOVERS", "4.5")),
+}
+
+# Max bets where same team + same direction share a game (teammate correlation cap)
+MAX_SAME_TEAM_DIRECTION = int(os.getenv("MAX_SAME_TEAM_DIRECTION", "2"))
 
 
 def no_vig_probs(over_price: float, under_price: float) -> tuple[float, float]:
@@ -242,10 +259,8 @@ def screen_player(
         win_prob = 0.55 if abs(diff) > 2 else 0.52
         edge_pct = (win_prob - 0.5) * 100
 
-    if edge_pct < MIN_EDGE_PCT:
-        return None
-
-    if win_prob < MIN_WIN_PROB:
+    market_min_edge = MARKET_MIN_EDGE.get(market, MIN_EDGE_PCT)
+    if edge_pct < market_min_edge:
         return None
 
     price_col = float(over_price) if side == "OVER" else float(under_price)
@@ -253,6 +268,10 @@ def screen_player(
 
     kf = kelly_fraction(win_prob, dec_odds, edge_pct=edge_pct)
     bet_dollars = round(kf * BANKROLL)
+
+    # Late-season load management risk: April games with starters (>28 avg min)
+    avg_min = feats.get("roll_min_10", 0) or 0
+    load_mgmt_risk = bool(game_date[5:7] == "04" and avg_min > 28)
 
     return {
         "player": player_name,
@@ -267,6 +286,8 @@ def screen_player(
         "bet_dollars": bet_dollars,
         "game": f"{away_team} @ {home_team}",
         "commence_time": commence_time,
+        "player_team": team_abbr,
+        "load_mgmt_risk": load_mgmt_risk,
     }
 
 
@@ -503,6 +524,32 @@ def run_screener(
         bets_df = bets_df[
             bets_df.groupby("game").cumcount() < MAX_BETS_PER_GAME
         ].reset_index(drop=True)
+
+    # Teammate same-direction cap: prevent highly correlated bets on the same team/side.
+    # E.g. 3× UNDER on slow-paced team = nearly identical outcomes.
+    if MAX_SAME_TEAM_DIRECTION > 0 and "player_team" in bets_df.columns:
+        bets_df["_tgs"] = bets_df["player_team"] + "|" + bets_df["game"] + "|" + bets_df["side"]
+        bets_df = bets_df[
+            bets_df.groupby("_tgs").cumcount() < MAX_SAME_TEAM_DIRECTION
+        ].reset_index(drop=True)
+        bets_df = bets_df.drop(columns=["_tgs"])
+
+    # Parlay detection: flag same-game same-team same-direction legs as correlated parlay candidates.
+    if "player_team" in bets_df.columns and "game" in bets_df.columns:
+        _parlay_map: dict[str, list[str]] = {}
+        for _, row in bets_df.iterrows():
+            key = f"{row.get('game', '')}|{row.get('player_team', '')}|{row.get('side', '')}"
+            _parlay_map.setdefault(key, []).append(str(row["player"]))
+        bets_df["parlay_note"] = bets_df.apply(
+            lambda r: ", ".join(
+                p for p in _parlay_map.get(
+                    f"{r.get('game', '')}|{r.get('player_team', '')}|{r.get('side', '')}", []
+                ) if p != r["player"]
+            ),
+            axis=1,
+        )
+    else:
+        bets_df["parlay_note"] = ""
 
     # Cap to top N bets FIRST so scaling is based only on shown bets
     if MAX_BETS > 0:

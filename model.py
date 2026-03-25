@@ -229,12 +229,30 @@ def _train_target(target: str, do_eval: bool, retrain: bool) -> XGBRegressor:
     preds = model.predict(X)
     mae = mean_absolute_error(y, preds)
     rmse = root_mean_squared_error(y, preds)
-    residuals = y.values - preds
-    residual_sigma = float(np.std(residuals))
+
+    # OOS sigma via last TimeSeriesSplit fold — more realistic than in-sample residuals.
+    # In-sample residuals underestimate true uncertainty due to overfitting.
+    oos_sigma = None
+    try:
+        tscv = TimeSeriesSplit(n_splits=5)
+        folds = list(tscv.split(X))
+        last_train_idx, last_test_idx = folds[-1]
+        m_oos = XGBRegressor(
+            n_estimators=400, learning_rate=0.05, max_depth=5,
+            subsample=0.8, colsample_bytree=0.8, min_child_weight=10,
+            reg_alpha=0.1, reg_lambda=1.0, random_state=42, n_jobs=-1, verbosity=0,
+        )
+        m_oos.fit(X.iloc[last_train_idx], y.iloc[last_train_idx])
+        oos_preds = m_oos.predict(X.iloc[last_test_idx])
+        oos_sigma = float(np.std(y.iloc[last_test_idx].values - oos_preds))
+    except Exception as _e:
+        print(f"  [model] OOS sigma failed ({_e}) — falling back to in-sample")
+
+    residual_sigma = oos_sigma if oos_sigma else float(np.std(y.values - preds))
     # Store sigma on the model so screener can use data-driven edge estimates
     model.residual_sigma_ = residual_sigma
     save_model(model, path)
-    print(f"  In-sample MAE={mae:.2f}  RMSE={rmse:.2f}  residual_sigma={residual_sigma:.2f}")
+    print(f"  In-sample MAE={mae:.2f}  RMSE={rmse:.2f}  residual_sigma={residual_sigma:.2f} ({'OOS' if oos_sigma else 'in-sample'})")
 
     imp_df = feature_importance(model, list(X.columns))
     print(imp_df.to_string(index=False))
