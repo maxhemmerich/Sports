@@ -741,6 +741,7 @@ def _fetch_live_stats() -> dict[str, dict]:
         _raw_clock = game.get("gameClock", "")
         period = game.get("period", 0)
         status_label = "pre" if gstatus == 1 else ("final" if gstatus == 3 else "live")
+        game_date = (game.get("gameDateEst", "") or "")[:10]  # "YYYY-MM-DD" local date
         import re as _re
         _cm = _re.match(r'PT(?:(\d+)M)?(\d+(?:\.\d+)?)S', _raw_clock)
         # seconds remaining in this quarter
@@ -774,6 +775,7 @@ def _fetch_live_stats() -> dict[str, dict]:
                     "tov":  s.get("turnovers", 0),
                     "status": status_label,
                     "period": period, "clock_secs": clock_secs,
+                    "game_date": game_date,
                 }
     return result
 
@@ -1224,7 +1226,12 @@ function renderOpen() {
         <div class="open-tile-grid">` +
         bets.map(b => {
           const sideClass = b.side === 'OVER' ? 'over' : 'under';
-          const live = _liveStats[(b.player||'').toLowerCase()];
+          let live = _liveStats[(b.player||'').toLowerCase()];
+          // Guard against back-to-back: ignore live stats from a different game date
+          // (yesterday's final shows up in todaysScoreboard for back-to-back players)
+          if (live && live.game_date && b.date && live.game_date !== b.date) {
+            live = undefined;
+          }
           const statKey = _MKT_STAT[b.market] || b.market;
           let liveHtml = '';
           let busted = false;
