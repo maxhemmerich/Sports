@@ -1183,6 +1183,10 @@ function renderPot() {
     const sideClass = b.side === 'OVER' ? 'over' : 'under';
     const loadBadge = b.load_mgmt_risk ? '<span style="font-size:.64rem;background:rgba(210,153,34,.18);color:var(--yellow);border-radius:4px;padding:1px 5px;margin-left:2px" title="April game — possible load management">rest risk</span>' : '';
     const parlayBadge = b.parlay_note ? `<div style="font-size:.67rem;color:var(--muted);margin-top:3px" title="Correlated leg — consider parlay">&#x1F517; parlay w/ ${b.parlay_note}</div>` : '';
+    // Warn if game is already live (screener lines cache can lag up to 30 min)
+    const playerLive = _liveStats[(b.player||'').toLowerCase()];
+    const gameActive = playerLive && (playerLive.status === 'live' || playerLive.status === 'final');
+    const liveBadge = gameActive ? '<div style="font-size:.67rem;color:var(--red);margin-top:2px">&#9888; Game already in progress — bet with caution</div>' : '';
     return `<div class="pot-tile">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <span class="player">${b.player}</span>
@@ -1192,7 +1196,7 @@ function renderPot() {
         ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
         ${cap(b.bookmaker)} · pred: ${b.prediction}<br>
         <span style="color:var(--muted);font-size:.67rem">${b.game}</span>
-      </div>${parlayBadge}
+      </div>${parlayBadge}${liveBadge}
       <div class="actions">
         $<input type="number" id="amt-${sid}" value="${b.suggested.toFixed(2)}" min="1" step="1">
         <button class="btn-place" onclick="placeBet(${keyAttr})">Place</button>
