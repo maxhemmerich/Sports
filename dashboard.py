@@ -85,38 +85,7 @@ def _build_state() -> dict:
         }
     total_balance = sum(b["avail"] for b in book_info.values())
 
-    # ── Open bets ─────────────────────────────────────────────────────────────
-    open_bets: list[dict] = []
-    wagered = to_gain = to_lose = 0.0
-    if TRACKER_PATH.exists():
-        try:
-            tr = pd.read_csv(TRACKER_PATH)
-            pending = tr[tr["result"].isna() | (tr["result"].astype(str).str.strip() == "")]
-            for orig_idx, row in pending.iterrows():
-                stake = float(row.get("entered_$", 0) or 0)
-                odds = float(row.get("odds", -110) or -110)
-                dec = _american_to_decimal(odds)
-                profit = round(stake * (dec - 1), 2)
-                wagered += stake
-                to_gain += profit
-                to_lose += stake
-                mkt = str(row.get("market", "")).replace("player_", "")
-                open_bets.append({
-                    "tracker_idx": int(orig_idx),
-                    "date": str(row.get("date", "")),
-                    "player": str(row.get("player", "")),
-                    "market": mkt,
-                    "line": float(row.get("line", 0)),
-                    "side": str(row.get("side", "")),
-                    "odds": int(odds),
-                    "bookmaker": str(row.get("bookmaker", "")),
-                    "entered": round(stake, 2),
-                    "to_win": profit,
-                })
-        except Exception:
-            pass
-
-    # ── Potential bets ────────────────────────────────────────────────────────
+    # ── NaN-safe helpers (used in open_bets and potential bets below) ──────────
     def _sf(v, d=0.0):
         """Safe float: return d if v is NaN/None/non-numeric."""
         try:
@@ -132,6 +101,39 @@ def _build_state() -> dict:
             return int(f) if f == f else d
         except (TypeError, ValueError):
             return d
+
+    # ── Open bets ─────────────────────────────────────────────────────────────
+    open_bets: list[dict] = []
+    wagered = to_gain = to_lose = 0.0
+    if TRACKER_PATH.exists():
+        try:
+            tr = pd.read_csv(TRACKER_PATH)
+            pending = tr[tr["result"].isna() | (tr["result"].astype(str).str.strip() == "")]
+            for orig_idx, row in pending.iterrows():
+                stake = _sf(row.get("entered_$", 0))
+                odds = _sf(row.get("odds", -110)) or -110
+                dec = _american_to_decimal(odds)
+                profit = round(stake * (dec - 1), 2)
+                wagered += stake
+                to_gain += profit
+                to_lose += stake
+                mkt = str(row.get("market", "")).replace("player_", "")
+                open_bets.append({
+                    "tracker_idx": int(orig_idx),
+                    "date": str(row.get("date", "")),
+                    "player": str(row.get("player", "")),
+                    "market": mkt,
+                    "line": _sf(row.get("line", 0)),
+                    "side": str(row.get("side", "")),
+                    "odds": _si(row.get("odds"), -110),
+                    "bookmaker": str(row.get("bookmaker", "")),
+                    "entered": round(stake, 2),
+                    "to_win": profit,
+                })
+        except Exception:
+            pass
+
+    # ── Potential bets ────────────────────────────────────────────────────────
 
     potential: list[dict] = []
     if not bets.empty:
