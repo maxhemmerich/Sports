@@ -24,6 +24,25 @@ CURRENT_SEASON = SEASONS[-1]
 GAMELOG_CACHE_HOURS = int(__import__("os").getenv("GAMELOG_CACHE_HOURS", "12"))
 COMBINED_CACHE_HOURS = int(__import__("os").getenv("COMBINED_CACHE_HOURS", "12"))
 
+# Dtype map — use float32/int32 to halve memory vs pandas' default float64/int64
+_GAMELOG_DTYPES: dict = {
+    "player_id": "Int32",
+    "team_id": "Int32",
+    "pts": "float32",
+    "reb": "float32",
+    "ast": "float32",
+    "fga": "float32",
+    "fgm": "float32",
+    "fg3a": "float32",
+    "fg3m": "float32",
+    "fta": "float32",
+    "ftm": "float32",
+    "stl": "float32",
+    "blk": "float32",
+    "tov": "float32",
+    "plus_minus": "float32",
+}
+
 # Full browser headers — stats.nba.com rejects bot-like requests
 _SESSION = requests.Session()
 _SESSION.headers.update({
@@ -180,7 +199,8 @@ def fetch_player_gamelogs(season: str) -> pd.DataFrame:
         # Past seasons are final; only refresh the current season periodically.
         if season != CURRENT_SEASON or age_hours <= GAMELOG_CACHE_HOURS:
             print(f"  [cache] Loading {season} from {cache_path}")
-            df = pd.read_csv(cache_path, low_memory=False)
+            use_dt = {k: v for k, v in _GAMELOG_DTYPES.items()}
+            df = pd.read_csv(cache_path, dtype=use_dt)
             df["game_date"] = pd.to_datetime(df["game_date"])
             return df
         print(f"  [cache] {season} cache is {age_hours:.1f}h old — refreshing ...")
@@ -232,7 +252,8 @@ def load_gamelogs() -> pd.DataFrame:
         age_hours = (time.time() - out_path.stat().st_mtime) / 3600
         if age_hours <= COMBINED_CACHE_HOURS:
             print(f"[data] Loading combined gamelogs from cache: {out_path}")
-            df = pd.read_csv(out_path, low_memory=False)
+            use_dt = {k: v for k, v in _GAMELOG_DTYPES.items()}
+            df = pd.read_csv(out_path, dtype=use_dt)
             df["game_date"] = pd.to_datetime(df["game_date"])
             return df
         print(f"[data] Combined cache is {age_hours:.1f}h old — refreshing ...")
@@ -321,6 +342,223 @@ def build_defense_lookup() -> pd.DataFrame:
     combined.to_csv(out_path, index=False)
     print(f"[data] Defense lookup → {out_path}")
     return combined
+
+
+def _get_opp_abbr_data(matchup: str, team_abbr: str) -> str:
+    """Extract opponent abbreviation from matchup string."""
+    for sep in [" vs. ", " @ "]:
+        if sep in matchup:
+            left, right = matchup.split(sep, 1)
+            left, right = left.strip(), right.strip()
+            return right if left == team_abbr else left
+    return ""
+
+
+_ROLLING_DEF_STATS = ["pts", "reb", "ast", "fg3m", "blk", "stl", "tov"]
+
+
+def build_rolling_defense_lookup(window: int = 15) -> pd.DataFrame:
+    """
+    Pre-compute rolling N-game defensive averages per (game_id, defending_team).
+
+    For each game G and team T, records the average stats T allowed per game
+    in the N games BEFORE G (no lookahead). Stored as:
+        game_id, defending_team, opp_pts_allowed_roll{N}, opp_reb_allowed_roll{N}, ...
+
+    Cached to data/rolling_defense_{N}g.csv.
+    """
+    out_path = DATA_DIR / f"rolling_defense_{window}g.csv"
+    if out_path.exists():
+        age_hours = (time.time() - out_path.stat().st_mtime) / 3600
+        if age_hours <= COMBINED_CACHE_HOURS:
+            return pd.read_csv(out_path)
+        out_path.unlink()
+
+    df = load_gamelogs()
+    required = {"game_id", "team_abbreviation", "game_date", "matchup"}
+    stat_cols = [s for s in _ROLLING_DEF_STATS if s in df.columns]
+    if not required.issubset(df.columns) or not stat_cols:
+        return pd.DataFrame()
+
+    # Sum all players' stats per (game_id, team)
+    team_game = (
+        df.groupby(["game_id", "team_abbreviation", "game_date"])[stat_cols]
+        .sum()
+        .reset_index()
+    )
+    team_game[stat_cols] = team_game[stat_cols].astype("float32")
+
+    # Map (game_id, team) → opponent abbreviation
+    opp_series = df[["game_id", "team_abbreviation", "matchup"]].drop_duplicates(
+        subset=["game_id", "team_abbreviation"]
+    )
+    opp_series = opp_series.copy()
+    opp_series["_opp"] = opp_series.apply(
+        lambda r: _get_opp_abbr_data(str(r["matchup"]), str(r["team_abbreviation"])),
+        axis=1,
+    )
+    team_game = team_game.merge(
+        opp_series[["game_id", "team_abbreviation", "_opp"]],
+        on=["game_id", "team_abbreviation"],
+        how="left",
+    )
+
+    # What team X scored in game G = what X's opponent (defending_team) allowed in G
+    # Rename: defending_team = _opp (the team doing the defending)
+    team_game = team_game.rename(columns={"_opp": "defending_team"})
+    team_game = team_game[team_game["defending_team"].notna() & (team_game["defending_team"] != "")]
+
+    team_game = team_game.sort_values(["defending_team", "game_date"])
+
+    roll_cols = []
+    for stat in stat_cols:
+        col = f"opp_{stat}_allowed_roll{window}"
+        team_game[col] = (
+            team_game.groupby("defending_team")[stat]
+            .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
+        )
+        roll_cols.append(col)
+
+    result = team_game[["game_id", "defending_team"] + roll_cols].copy()
+    result.to_csv(out_path, index=False)
+    print(f"[data] Rolling {window}-game defense lookup → {out_path} ({len(result)} rows)")
+    return result
+
+
+def build_positional_defense_lookup(window: int = 15) -> pd.DataFrame:
+    """
+    Pre-compute rolling N-game positional defensive averages per (game_id, defending_team, pos).
+
+    Position group is inferred from each player's actual reb in prior games
+    (guard: <4, forward: 4-6, big: >=7). Per-position avg stats allowed are
+    computed with a rolling window (no lookahead).
+
+    Columns: game_id, defending_team, pos_group,
+             opp_pts_allowed_pos, opp_reb_allowed_pos, opp_ast_allowed_pos
+
+    Cached to data/positional_defense.csv.
+    """
+    out_path = DATA_DIR / "positional_defense.csv"
+    if out_path.exists():
+        age_hours = (time.time() - out_path.stat().st_mtime) / 3600
+        if age_hours <= COMBINED_CACHE_HOURS:
+            return pd.read_csv(out_path)
+        out_path.unlink()
+
+    df = load_gamelogs()
+    required = {"game_id", "team_abbreviation", "game_date", "matchup", "player_id", "reb"}
+    stat_cols = [s for s in ["pts", "reb", "ast"] if s in df.columns]
+    if not required.issubset(df.columns) or not stat_cols:
+        return pd.DataFrame()
+
+    df = df.sort_values(["player_id", "game_date"]).copy()
+
+    # Compute rolling reb to infer position (shifted to avoid lookahead)
+    df["_reb_roll10"] = (
+        df.groupby("player_id")["reb"]
+        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+        .fillna(df["reb"])
+    ).astype("float32")
+
+    reb = df["_reb_roll10"]
+    df["_pos"] = "guard"
+    df.loc[reb >= 4, "_pos"] = "forward"
+    df.loc[reb >= 7, "_pos"] = "big"
+
+    # Opponent abbreviation for each row
+    opp_series = df[["game_id", "team_abbreviation", "matchup"]].drop_duplicates(
+        subset=["game_id", "team_abbreviation"]
+    ).copy()
+    opp_series["_opp"] = opp_series.apply(
+        lambda r: _get_opp_abbr_data(str(r["matchup"]), str(r["team_abbreviation"])),
+        axis=1,
+    )
+    df = df.merge(
+        opp_series[["game_id", "team_abbreviation", "_opp"]],
+        on=["game_id", "team_abbreviation"],
+        how="left",
+    )
+    df = df[df["_opp"].notna() & (df["_opp"] != "")]
+
+    # Per-game per-position-group totals (what each pos group scored vs defending_team)
+    pos_game = (
+        df.groupby(["game_id", "_opp", "_pos", "game_date"])[stat_cols]
+        .mean()  # avg per player in that pos group vs that team
+        .reset_index()
+        .rename(columns={"_opp": "defending_team"})
+    )
+    pos_game = pos_game.sort_values(["defending_team", "_pos", "game_date"])
+
+    roll_cols = []
+    for stat in stat_cols:
+        col = f"opp_{stat}_allowed_pos"
+        pos_game[col] = (
+            pos_game.groupby(["defending_team", "_pos"])[stat]
+            .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
+        )
+        roll_cols.append(col)
+
+    result = pos_game[["game_id", "defending_team", "_pos"] + roll_cols].rename(
+        columns={"_pos": "pos_group"}
+    )
+    result.to_csv(out_path, index=False)
+    print(f"[data] Positional defense lookup → {out_path} ({len(result)} rows)")
+    return result
+
+
+def build_game_context_lookup() -> pd.DataFrame:
+    """
+    Pre-compute rolling 10-game team scoring and game totals per (game_id, team_abbreviation).
+
+    Columns: game_id, team_abbreviation,
+             roll_team_pts_10 (team's pts/game rolling avg before this game),
+             roll_game_total_10 (both teams' pts rolling avg before this game)
+
+    Cached to data/game_context.csv.
+    """
+    out_path = DATA_DIR / "game_context.csv"
+    if out_path.exists():
+        age_hours = (time.time() - out_path.stat().st_mtime) / 3600
+        if age_hours <= COMBINED_CACHE_HOURS:
+            return pd.read_csv(out_path)
+        out_path.unlink()
+
+    df = load_gamelogs()
+    required = {"game_id", "team_abbreviation", "game_date", "pts"}
+    if not required.issubset(df.columns):
+        return pd.DataFrame()
+
+    # Sum all players' pts per (game_id, team)
+    team_game = (
+        df.groupby(["game_id", "team_abbreviation", "game_date"])["pts"]
+        .sum()
+        .reset_index()
+        .rename(columns={"pts": "_team_pts"})
+    )
+
+    # Sum both teams per game_id → game total
+    game_total = (
+        team_game.groupby("game_id")["_team_pts"]
+        .sum()
+        .reset_index()
+        .rename(columns={"_team_pts": "_game_total"})
+    )
+    team_game = team_game.merge(game_total, on="game_id")
+
+    team_game = team_game.sort_values(["team_abbreviation", "game_date"])
+    team_game["roll_team_pts_10"] = (
+        team_game.groupby("team_abbreviation")["_team_pts"]
+        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+    ).astype("float32")
+    team_game["roll_game_total_10"] = (
+        team_game.groupby("team_abbreviation")["_game_total"]
+        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+    ).astype("float32")
+
+    result = team_game[["game_id", "team_abbreviation", "roll_team_pts_10", "roll_game_total_10"]]
+    result.to_csv(out_path, index=False)
+    print(f"[data] Game context lookup → {out_path} ({len(result)} rows)")
+    return result
 
 
 if __name__ == "__main__":

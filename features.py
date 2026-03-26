@@ -17,7 +17,13 @@ import time
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from data import load_gamelogs, build_defense_lookup
+from data import (
+    load_gamelogs,
+    build_defense_lookup,
+    build_rolling_defense_lookup,
+    build_positional_defense_lookup,
+    build_game_context_lookup,
+)
 
 
 def _parse_minutes(val) -> float:
@@ -408,121 +414,63 @@ MARKET_CONFIG = {
 
 def add_game_context_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add rolling team-scoring and game-total features computed from game logs.
+    Add rolling team-scoring and game-total features via pre-computed lookup.
     - roll_team_pts_10: player's team rolling 10-game pts per game
     - roll_game_total_10: rolling 10-game total (both teams' pts)
-    These serve as proxies for game pace / implied team total when live market
-    totals are unavailable.
     """
-    if not {"pts", "game_id", "team_abbreviation", "game_date"}.issubset(df.columns):
+    if not {"game_id", "team_abbreviation"}.issubset(df.columns):
         df["roll_team_pts_10"]   = _TEAM_PTS_DEFAULT
         df["roll_game_total_10"] = _GAME_TOTAL_DEFAULT
         return df
 
-    df = df.copy()
+    lookup = build_game_context_lookup()
+    if lookup.empty:
+        df["roll_team_pts_10"]   = _TEAM_PTS_DEFAULT
+        df["roll_game_total_10"] = _GAME_TOTAL_DEFAULT
+        return df
 
-    # Sum all players' pts per (game_id, team)
-    team_game = (
-        df.groupby(["game_id", "team_abbreviation", "game_date"])["pts"]
-        .sum()
-        .reset_index()
-        .rename(columns={"pts": "_tgp"})
-    )
-    # Sum both teams to get game total
-    game_total = (
-        team_game.groupby("game_id")["_tgp"]
-        .sum()
-        .reset_index()
-        .rename(columns={"_tgp": "_gtp"})
-    )
-    team_game = team_game.merge(game_total, on="game_id")
-
-    team_game = team_game.sort_values(["team_abbreviation", "game_date"])
-    team_game["_roll_team_pts"] = (
-        team_game.groupby("team_abbreviation")["_tgp"]
-        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
-    )
-    team_game["_roll_game_total"] = (
-        team_game.groupby("team_abbreviation")["_gtp"]
-        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
-    )
-
-    df = df.merge(
-        team_game[["game_id", "team_abbreviation", "_roll_team_pts", "_roll_game_total"]],
-        on=["game_id", "team_abbreviation"],
-        how="left",
-    )
-    df["roll_team_pts_10"]   = df["_roll_team_pts"].fillna(_TEAM_PTS_DEFAULT)
-    df["roll_game_total_10"] = df["_roll_game_total"].fillna(_GAME_TOTAL_DEFAULT)
-    df = df.drop(columns=["_roll_team_pts", "_roll_game_total"], errors="ignore")
+    df = df.merge(lookup, on=["game_id", "team_abbreviation"], how="left")
+    df["roll_team_pts_10"]   = df["roll_team_pts_10"].fillna(_TEAM_PTS_DEFAULT)
+    df["roll_game_total_10"] = df["roll_game_total_10"].fillna(_GAME_TOTAL_DEFAULT)
     return df
 
 
 def add_rolling_opp_defense(df: pd.DataFrame, window: int = _ROLL_DEF_WINDOW) -> pd.DataFrame:
     """
-    For each player-game row, compute the opponent team's rolling N-game
-    defensive averages leading up to that game (no lookahead).
-
+    Merge pre-computed rolling N-game opponent defensive averages into the DataFrame.
     Adds columns: opp_{stat}_allowed_roll{window}
-    These replace the season-long opp_{stat}_allowed for the rolling signal.
     """
-    req = {"game_id", "team_abbreviation", "matchup", "game_date"}
-    if not req.issubset(df.columns):
+    roll_cols = [f"opp_{stat}_allowed_roll{window}" for stat in _DEFENSE_STAT_DEFAULTS]
+
+    if "game_id" not in df.columns or "team_abbreviation" not in df.columns or "matchup" not in df.columns:
+        for stat, default in _DEFENSE_STAT_DEFAULTS.items():
+            df[f"opp_{stat}_allowed_roll{window}"] = default
+        return df
+
+    lookup = build_rolling_defense_lookup(window)
+    if lookup.empty:
         for stat, default in _DEFENSE_STAT_DEFAULTS.items():
             df[f"opp_{stat}_allowed_roll{window}"] = default
         return df
 
     df = df.copy()
-    stat_cols = [s for s in _DEFENSE_STAT_DEFAULTS if s in df.columns]
-
-    # opp_abbr for each player row
     df["_opp_abbr"] = df.apply(
         lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
         axis=1,
     )
 
-    # Per-game team totals (what each team scored in each game)
-    team_game = (
-        df.groupby(["game_id", "team_abbreviation", "game_date"])[stat_cols]
-        .sum()
-        .reset_index()
-    )
-
-    # Get (game_id, team_abbreviation) → opp_abbr mapping
-    opp_map = (
-        df[["game_id", "team_abbreviation", "_opp_abbr"]]
-        .drop_duplicates(subset=["game_id", "team_abbreviation"])
-    )
-    team_game = team_game.merge(opp_map, on=["game_id", "team_abbreviation"], how="left")
-
-    # What team X scored in game G = what X's opponent (defending_team=_opp_abbr) allowed in G
-    defense = (
-        team_game
-        .rename(columns={"_opp_abbr": "defending_team"})
-        .sort_values(["defending_team", "game_date"])
-    )
-
-    roll_cols = []
-    for stat in stat_cols:
-        col = f"opp_{stat}_allowed_roll{window}"
-        defense[col] = (
-            defense.groupby("defending_team")[stat]
-            .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
-        )
-        defense[col] = defense[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
-        roll_cols.append(col)
-
-    # Merge back: player's opp = defending_team
     df = df.merge(
-        defense[["game_id", "defending_team"] + roll_cols].rename(
-            columns={"defending_team": "_opp_abbr"}
-        ),
+        lookup.rename(columns={"defending_team": "_opp_abbr"}),
         on=["game_id", "_opp_abbr"],
         how="left",
     )
-    for col in roll_cols:
-        stat = col.replace("opp_", "").replace(f"_allowed_roll{window}", "")
-        df[col] = df[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+
+    for stat, default in _DEFENSE_STAT_DEFAULTS.items():
+        col = f"opp_{stat}_allowed_roll{window}"
+        if col in df.columns:
+            df[col] = df[col].fillna(default)
+        else:
+            df[col] = default
 
     df = df.drop(columns=["_opp_abbr"], errors="ignore")
     return df
@@ -530,23 +478,26 @@ def add_rolling_opp_defense(df: pd.DataFrame, window: int = _ROLL_DEF_WINDOW) ->
 
 def add_positional_defense(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add opponent defense split by position group (guard / forward / big).
-    Position is inferred from roll_reb_10 (simple but effective proxy):
-      guard:   roll_reb_10 < 4
-      forward: 4 <= roll_reb_10 < 7
-      big:     roll_reb_10 >= 7
-
+    Merge pre-computed positional defensive averages into the DataFrame.
+    Position group inferred from roll_reb_10 (guard/forward/big).
     Adds: opp_pts_allowed_pos, opp_reb_allowed_pos, opp_ast_allowed_pos
     """
-    req = {"game_id", "team_abbreviation", "matchup", "game_date", "roll_reb_10", "pts"}
-    if not req.issubset(df.columns):
-        for stat in ["pts", "reb", "ast"]:
+    pos_stats = ["pts", "reb", "ast"]
+    pos_cols = [f"opp_{s}_allowed_pos" for s in pos_stats]
+
+    if "game_id" not in df.columns or "matchup" not in df.columns or "roll_reb_10" not in df.columns:
+        for stat in pos_stats:
+            df[f"opp_{stat}_allowed_pos"] = _DEFENSE_STAT_DEFAULTS[stat]
+        return df
+
+    lookup = build_positional_defense_lookup()
+    if lookup.empty:
+        for stat in pos_stats:
             df[f"opp_{stat}_allowed_pos"] = _DEFENSE_STAT_DEFAULTS[stat]
         return df
 
     df = df.copy()
 
-    # Infer position group for each player-game row
     reb = df["roll_reb_10"].fillna(0)
     df["_pos"] = "guard"
     df.loc[reb >= 4, "_pos"] = "forward"
@@ -557,32 +508,18 @@ def add_positional_defense(df: pd.DataFrame) -> pd.DataFrame:
         axis=1,
     )
 
-    stat_cols = [s for s in ["pts", "reb", "ast"] if s in df.columns]
-
-    # Per-game per-position-group stats
-    pos_game = (
-        df.groupby(["game_id", "_opp_abbr", "_pos", "game_date"])[stat_cols]
-        .mean()  # avg player in that pos group per game vs that opponent
-        .reset_index()
-    )
-
-    pos_game = pos_game.sort_values(["_opp_abbr", "_pos", "game_date"])
-    for stat in stat_cols:
-        col = f"opp_{stat}_allowed_pos"
-        pos_game[col] = (
-            pos_game.groupby(["_opp_abbr", "_pos"])[stat]
-            .transform(lambda x: x.shift(1).rolling(15, min_periods=1).mean())
-        )
-        pos_game[col] = pos_game[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
-
     df = df.merge(
-        pos_game[["game_id", "_opp_abbr", "_pos"] + [f"opp_{stat}_allowed_pos" for stat in stat_cols]],
+        lookup.rename(columns={"defending_team": "_opp_abbr", "pos_group": "_pos"}),
         on=["game_id", "_opp_abbr", "_pos"],
         how="left",
     )
-    for stat in stat_cols:
+
+    for stat in pos_stats:
         col = f"opp_{stat}_allowed_pos"
-        df[col] = df[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+        if col in df.columns:
+            df[col] = df[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+        else:
+            df[col] = _DEFENSE_STAT_DEFAULTS.get(stat, 0.0)
 
     df = df.drop(columns=["_opp_abbr", "_pos"], errors="ignore")
     return df
@@ -638,8 +575,13 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
         df = load_gamelogs()
 
     print("[features] Building feature matrix ...")
+    # Pre-compute all lookup tables first (cached to CSV) before heavy in-memory ops.
+    # This keeps peak memory low: lookups are small; the full df is only held once.
     def_lookup = build_defense_lookup()
     pace_lookup = build_pace_lookup()
+    build_rolling_defense_lookup()     # caches rolling_defense_15g.csv
+    build_positional_defense_lookup()  # caches positional_defense.csv
+    build_game_context_lookup()        # caches game_context.csv
 
     df = add_rolling_features(df)
     df = add_rest_features(df)
