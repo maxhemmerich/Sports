@@ -191,6 +191,11 @@ _DEFENSE_STAT_DEFAULTS = {
     "fg3m": 12.0, "blk": 5.0, "stl": 7.0, "tov": 13.0,
 }
 
+# Defaults for game-context features (league averages)
+_GAME_TOTAL_DEFAULT = 225.0       # NBA league-avg total points per game
+_TEAM_PTS_DEFAULT   = 112.5       # half of game total
+_ROLL_DEF_WINDOW    = 15          # rolling opponent defense window (games)
+
 
 def add_defense_features(df: pd.DataFrame, def_lookup: pd.DataFrame) -> pd.DataFrame:
     """
@@ -353,33 +358,41 @@ _CONTEXT_COLS = [
     "roll_min_10",
     "ewm_min_10",
     "min_trend",             # roll_min_5 / roll_min_20 — detects role changes (injury/trade)
+    "roll_team_pts_10",      # player's team rolling 10-game pts/game (pace/role proxy)
+    "roll_game_total_10",    # rolling 10-game game total (pace context)
 ]
 
 FEATURE_COLS = [
     "roll_pts_5", "roll_pts_10", "roll_pts_20", "ewm_pts_10",
-    "roll_pts_std_5", "roll_pts_std_10",   # consistency signal
+    "roll_pts_std_5", "roll_pts_std_10",
     "vs_opp_pts_avg",
-    "opp_pts_allowed",       # market-specific: pts allowed by opponent
+    "opp_pts_allowed",           # season-long opponent pts allowed
+    "opp_pts_allowed_roll15",    # rolling 15-game opponent pts allowed (more current)
+    "opp_pts_allowed_pos",       # position-specific opponent pts allowed
 ] + _CONTEXT_COLS
 
 FEATURE_COLS_REB = [
     "roll_reb_5", "roll_reb_10", "roll_reb_20", "ewm_reb_10",
     "roll_reb_std_5", "roll_reb_std_10",
     "vs_opp_reb_avg",
-    "opp_reb_allowed",       # market-specific: reb allowed by opponent
+    "opp_reb_allowed",
+    "opp_reb_allowed_roll15",
+    "opp_reb_allowed_pos",
 ] + _CONTEXT_COLS
 
 FEATURE_COLS_AST = [
     "roll_ast_5", "roll_ast_10", "roll_ast_20", "ewm_ast_10",
     "roll_ast_std_5", "roll_ast_std_10",
     "vs_opp_ast_avg",
-    "opp_ast_allowed",       # market-specific: ast allowed by opponent
+    "opp_ast_allowed",
+    "opp_ast_allowed_roll15",
+    "opp_ast_allowed_pos",
 ] + _CONTEXT_COLS
 
-FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "roll_fg3m_std_5", "roll_fg3m_std_10", "vs_opp_fg3m_avg", "opp_fg3m_allowed"] + _CONTEXT_COLS
-FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "roll_blk_std_5",  "roll_blk_std_10",  "vs_opp_blk_avg",  "opp_blk_allowed"]  + _CONTEXT_COLS
-FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "roll_stl_std_5",  "roll_stl_std_10",  "vs_opp_stl_avg",  "opp_stl_allowed"]  + _CONTEXT_COLS
-FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "roll_tov_std_5",  "roll_tov_std_10",  "vs_opp_tov_avg",  "opp_tov_allowed"]  + _CONTEXT_COLS
+FEATURE_COLS_FG3M = ["roll_fg3m_5", "roll_fg3m_10", "roll_fg3m_20", "ewm_fg3m_10", "roll_fg3m_std_5", "roll_fg3m_std_10", "vs_opp_fg3m_avg", "opp_fg3m_allowed", "opp_fg3m_allowed_roll15"] + _CONTEXT_COLS
+FEATURE_COLS_BLK  = ["roll_blk_5",  "roll_blk_10",  "roll_blk_20",  "ewm_blk_10",  "roll_blk_std_5",  "roll_blk_std_10",  "vs_opp_blk_avg",  "opp_blk_allowed",  "opp_blk_allowed_roll15"]  + _CONTEXT_COLS
+FEATURE_COLS_STL  = ["roll_stl_5",  "roll_stl_10",  "roll_stl_20",  "ewm_stl_10",  "roll_stl_std_5",  "roll_stl_std_10",  "vs_opp_stl_avg",  "opp_stl_allowed",  "opp_stl_allowed_roll15"]  + _CONTEXT_COLS
+FEATURE_COLS_TOV  = ["roll_tov_5",  "roll_tov_10",  "roll_tov_20",  "ewm_tov_10",  "roll_tov_std_5",  "roll_tov_std_10",  "vs_opp_tov_avg",  "opp_tov_allowed",  "opp_tov_allowed_roll15"]  + _CONTEXT_COLS
 
 # Map market key → (feature_cols, target_col)
 MARKET_CONFIG = {
@@ -391,6 +404,188 @@ MARKET_CONFIG = {
     "player_steals":    (FEATURE_COLS_STL,  TARGET_COL_STL),
     "player_turnovers": (FEATURE_COLS_TOV,  TARGET_COL_TOV),
 }
+
+
+def add_game_context_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add rolling team-scoring and game-total features computed from game logs.
+    - roll_team_pts_10: player's team rolling 10-game pts per game
+    - roll_game_total_10: rolling 10-game total (both teams' pts)
+    These serve as proxies for game pace / implied team total when live market
+    totals are unavailable.
+    """
+    if not {"pts", "game_id", "team_abbreviation", "game_date"}.issubset(df.columns):
+        df["roll_team_pts_10"]   = _TEAM_PTS_DEFAULT
+        df["roll_game_total_10"] = _GAME_TOTAL_DEFAULT
+        return df
+
+    df = df.copy()
+
+    # Sum all players' pts per (game_id, team)
+    team_game = (
+        df.groupby(["game_id", "team_abbreviation", "game_date"])["pts"]
+        .sum()
+        .reset_index()
+        .rename(columns={"pts": "_tgp"})
+    )
+    # Sum both teams to get game total
+    game_total = (
+        team_game.groupby("game_id")["_tgp"]
+        .sum()
+        .reset_index()
+        .rename(columns={"_tgp": "_gtp"})
+    )
+    team_game = team_game.merge(game_total, on="game_id")
+
+    team_game = team_game.sort_values(["team_abbreviation", "game_date"])
+    team_game["_roll_team_pts"] = (
+        team_game.groupby("team_abbreviation")["_tgp"]
+        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+    )
+    team_game["_roll_game_total"] = (
+        team_game.groupby("team_abbreviation")["_gtp"]
+        .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+    )
+
+    df = df.merge(
+        team_game[["game_id", "team_abbreviation", "_roll_team_pts", "_roll_game_total"]],
+        on=["game_id", "team_abbreviation"],
+        how="left",
+    )
+    df["roll_team_pts_10"]   = df["_roll_team_pts"].fillna(_TEAM_PTS_DEFAULT)
+    df["roll_game_total_10"] = df["_roll_game_total"].fillna(_GAME_TOTAL_DEFAULT)
+    df = df.drop(columns=["_roll_team_pts", "_roll_game_total"], errors="ignore")
+    return df
+
+
+def add_rolling_opp_defense(df: pd.DataFrame, window: int = _ROLL_DEF_WINDOW) -> pd.DataFrame:
+    """
+    For each player-game row, compute the opponent team's rolling N-game
+    defensive averages leading up to that game (no lookahead).
+
+    Adds columns: opp_{stat}_allowed_roll{window}
+    These replace the season-long opp_{stat}_allowed for the rolling signal.
+    """
+    req = {"game_id", "team_abbreviation", "matchup", "game_date"}
+    if not req.issubset(df.columns):
+        for stat, default in _DEFENSE_STAT_DEFAULTS.items():
+            df[f"opp_{stat}_allowed_roll{window}"] = default
+        return df
+
+    df = df.copy()
+    stat_cols = [s for s in _DEFENSE_STAT_DEFAULTS if s in df.columns]
+
+    # opp_abbr for each player row
+    df["_opp_abbr"] = df.apply(
+        lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
+        axis=1,
+    )
+
+    # Per-game team totals (what each team scored in each game)
+    team_game = (
+        df.groupby(["game_id", "team_abbreviation", "game_date"])[stat_cols]
+        .sum()
+        .reset_index()
+    )
+
+    # Get (game_id, team_abbreviation) → opp_abbr mapping
+    opp_map = (
+        df[["game_id", "team_abbreviation", "_opp_abbr"]]
+        .drop_duplicates(subset=["game_id", "team_abbreviation"])
+    )
+    team_game = team_game.merge(opp_map, on=["game_id", "team_abbreviation"], how="left")
+
+    # What team X scored in game G = what X's opponent (defending_team=_opp_abbr) allowed in G
+    defense = (
+        team_game
+        .rename(columns={"_opp_abbr": "defending_team"})
+        .sort_values(["defending_team", "game_date"])
+    )
+
+    roll_cols = []
+    for stat in stat_cols:
+        col = f"opp_{stat}_allowed_roll{window}"
+        defense[col] = (
+            defense.groupby("defending_team")[stat]
+            .transform(lambda x: x.shift(1).rolling(window, min_periods=1).mean())
+        )
+        defense[col] = defense[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+        roll_cols.append(col)
+
+    # Merge back: player's opp = defending_team
+    df = df.merge(
+        defense[["game_id", "defending_team"] + roll_cols].rename(
+            columns={"defending_team": "_opp_abbr"}
+        ),
+        on=["game_id", "_opp_abbr"],
+        how="left",
+    )
+    for col in roll_cols:
+        stat = col.replace("opp_", "").replace(f"_allowed_roll{window}", "")
+        df[col] = df[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+
+    df = df.drop(columns=["_opp_abbr"], errors="ignore")
+    return df
+
+
+def add_positional_defense(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add opponent defense split by position group (guard / forward / big).
+    Position is inferred from roll_reb_10 (simple but effective proxy):
+      guard:   roll_reb_10 < 4
+      forward: 4 <= roll_reb_10 < 7
+      big:     roll_reb_10 >= 7
+
+    Adds: opp_pts_allowed_pos, opp_reb_allowed_pos, opp_ast_allowed_pos
+    """
+    req = {"game_id", "team_abbreviation", "matchup", "game_date", "roll_reb_10", "pts"}
+    if not req.issubset(df.columns):
+        for stat in ["pts", "reb", "ast"]:
+            df[f"opp_{stat}_allowed_pos"] = _DEFENSE_STAT_DEFAULTS[stat]
+        return df
+
+    df = df.copy()
+
+    # Infer position group for each player-game row
+    reb = df["roll_reb_10"].fillna(0)
+    df["_pos"] = "guard"
+    df.loc[reb >= 4, "_pos"] = "forward"
+    df.loc[reb >= 7, "_pos"] = "big"
+
+    df["_opp_abbr"] = df.apply(
+        lambda r: _get_opp_abbr(str(r.get("matchup", "")), str(r.get("team_abbreviation", ""))),
+        axis=1,
+    )
+
+    stat_cols = [s for s in ["pts", "reb", "ast"] if s in df.columns]
+
+    # Per-game per-position-group stats
+    pos_game = (
+        df.groupby(["game_id", "_opp_abbr", "_pos", "game_date"])[stat_cols]
+        .mean()  # avg player in that pos group per game vs that opponent
+        .reset_index()
+    )
+
+    pos_game = pos_game.sort_values(["_opp_abbr", "_pos", "game_date"])
+    for stat in stat_cols:
+        col = f"opp_{stat}_allowed_pos"
+        pos_game[col] = (
+            pos_game.groupby(["_opp_abbr", "_pos"])[stat]
+            .transform(lambda x: x.shift(1).rolling(15, min_periods=1).mean())
+        )
+        pos_game[col] = pos_game[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+
+    df = df.merge(
+        pos_game[["game_id", "_opp_abbr", "_pos"] + [f"opp_{stat}_allowed_pos" for stat in stat_cols]],
+        on=["game_id", "_opp_abbr", "_pos"],
+        how="left",
+    )
+    for stat in stat_cols:
+        col = f"opp_{stat}_allowed_pos"
+        df[col] = df[col].fillna(_DEFENSE_STAT_DEFAULTS.get(stat, 0.0))
+
+    df = df.drop(columns=["_opp_abbr", "_pos"], errors="ignore")
+    return df
 
 
 def add_vs_opponent_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -454,6 +649,9 @@ def build_feature_matrix(df: pd.DataFrame | None = None) -> pd.DataFrame:
     df = add_defense_features(df, def_lookup)
     df = add_opp_pace(df, pace_lookup)
     df = add_vs_opponent_features(df)
+    df = add_game_context_features(df)
+    df = add_rolling_opp_defense(df)
+    df = add_positional_defense(df)
 
     # Role-change signal: recent minutes vs longer-term average
     if "roll_min_5" in df.columns and "roll_min_20" in df.columns:
@@ -476,6 +674,8 @@ def build_live_features(
     df_history: pd.DataFrame | None = None,
     def_lookup: pd.DataFrame | None = None,
     target: str = "pts",
+    game_total: float | None = None,
+    team_implied_total: float | None = None,
 ) -> dict:
     """
     Build a single feature row for live prediction.
@@ -580,11 +780,11 @@ def build_live_features(
     pace_lookup = build_pace_lookup()
     opp_team_pace = 85.0  # league avg fallback
     player_team_fga = 85.0  # fallback for usage calculation
+    player_team = str(player_df.iloc[-1].get("team_abbreviation", ""))
     if not pace_lookup.empty and "team_abbreviation" in pace_lookup.columns:
         opp_row = pace_lookup[pace_lookup["team_abbreviation"] == opponent_team_abbr]
         if not opp_row.empty:
             opp_team_pace = float(opp_row["team_avg_fga"].iloc[0])
-        player_team = str(player_df.iloc[-1].get("team_abbreviation", ""))
         own_row = pace_lookup[pace_lookup["team_abbreviation"] == player_team]
         if not own_row.empty:
             player_team_fga = float(own_row["team_avg_fga"].iloc[0])
@@ -605,6 +805,112 @@ def build_live_features(
                 vs_opp_games[stat_col].ewm(span=10, min_periods=1).mean().iloc[-1]
             )
 
+    # ── Game context features ──────────────────────────────────────────────────
+    # Rolling team scoring averages from historical logs
+    roll_team_pts_10   = _TEAM_PTS_DEFAULT
+    roll_game_total_10 = _GAME_TOTAL_DEFAULT
+    if "pts" in player_df.columns and "game_id" in df_history.columns and player_team:
+        # Compute from full game logs (not just player_df) to sum all teammates
+        cutoff = pd.Timestamp(game_date)
+        all_before = df_history[df_history["game_date"] < cutoff]
+        team_game_pts = (
+            all_before[all_before["team_abbreviation"] == player_team]
+            .groupby("game_id")["pts"].sum()
+        )
+        # Get dates for those game IDs
+        game_dates = (
+            all_before[all_before["team_abbreviation"] == player_team]
+            .groupby("game_id")["game_date"].first()
+        )
+        if not team_game_pts.empty:
+            tdf = pd.DataFrame({"pts": team_game_pts, "game_date": game_dates}).sort_values("game_date")
+            roll_team_pts_10 = float(tdf["pts"].iloc[:-0 if len(tdf) == 0 else None].tail(10).mean())
+
+        # Game total: need both teams' pts per game
+        game_totals_by_id = all_before.groupby("game_id")["pts"].sum()
+        gt_dates = all_before.groupby("game_id")["game_date"].first()
+        team_game_ids = set(team_game_pts.index)
+        if team_game_ids:
+            gt_df = pd.DataFrame({"total": game_totals_by_id, "game_date": gt_dates})
+            gt_df = gt_df[gt_df.index.isin(team_game_ids)].sort_values("game_date")
+            if not gt_df.empty:
+                roll_game_total_10 = float(gt_df["total"].tail(10).mean())
+
+    # Use live market game_total / team_implied_total if provided (more accurate than historical avg)
+    if game_total is not None and not pd.isna(game_total):
+        roll_game_total_10 = float(game_total)
+    if team_implied_total is not None and not pd.isna(team_implied_total):
+        roll_team_pts_10 = float(team_implied_total)
+
+    # ── Rolling opponent defense (last 15 games) ───────────────────────────────
+    opp_stat_allowed_roll = _DEFENSE_STAT_DEFAULTS.get(stat_col, opp_stat_allowed)
+    if opponent_team_abbr and "game_id" in df_history.columns and "team_abbreviation" in df_history.columns:
+        cutoff = pd.Timestamp(game_date)
+        all_before = df_history[df_history["game_date"] < cutoff]
+        # Find all game_ids where the opponent team played
+        opp_game_ids_dated = (
+            all_before[all_before["team_abbreviation"] == opponent_team_abbr]
+            .groupby("game_id")["game_date"].first()
+            .sort_values()
+        )
+        if not opp_game_ids_dated.empty:
+            recent_gids = opp_game_ids_dated.index[-_ROLL_DEF_WINDOW:]
+            # Stats allowed = what the non-opponent team scored in those games
+            opp_allowed_rows = all_before[
+                (all_before["game_id"].isin(recent_gids)) &
+                (all_before["team_abbreviation"] != opponent_team_abbr)
+            ]
+            if not opp_allowed_rows.empty and stat_col in opp_allowed_rows.columns:
+                per_game = opp_allowed_rows.groupby("game_id")[stat_col].sum()
+                opp_stat_allowed_roll = float(per_game.mean())
+
+    # ── Positional defense ────────────────────────────────────────────────────
+    roll_reb_10_for_pos = float(player_df["reb"].tail(10).mean()) if "reb" in player_df.columns else 0.0
+    if pd.isna(roll_reb_10_for_pos):
+        roll_reb_10_for_pos = 0.0
+    if roll_reb_10_for_pos >= 7:
+        pos_group = "big"
+    elif roll_reb_10_for_pos >= 4:
+        pos_group = "forward"
+    else:
+        pos_group = "guard"
+
+    # Positional defense: avg stat allowed by opponent to players in this position group
+    opp_stat_allowed_pos = opp_stat_allowed  # fallback to season-long
+    if opponent_team_abbr and stat_col in ["pts", "reb", "ast"] and "game_id" in df_history.columns:
+        cutoff = pd.Timestamp(game_date)
+        all_before = df_history[df_history["game_date"] < cutoff].copy()
+        if "roll_reb_10" not in all_before.columns and "reb" in all_before.columns:
+            all_before["_tmp_reb_roll"] = (
+                all_before.groupby("player_id")["reb"]
+                .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
+                if "player_id" in all_before.columns else all_before["reb"]
+            )
+            reb_col = "_tmp_reb_roll"
+        else:
+            reb_col = "roll_reb_10" if "roll_reb_10" in all_before.columns else None
+
+        if reb_col:
+            rr = all_before[reb_col].fillna(0)
+            all_before["_pos"] = "guard"
+            all_before.loc[rr >= 4, "_pos"] = "forward"
+            all_before.loc[rr >= 7, "_pos"] = "big"
+
+            opp_game_ids_dated = (
+                all_before[all_before["team_abbreviation"] == opponent_team_abbr]
+                .groupby("game_id")["game_date"].first()
+                .sort_values()
+            )
+            if not opp_game_ids_dated.empty:
+                recent_gids = opp_game_ids_dated.index[-15:]
+                pos_rows = all_before[
+                    (all_before["game_id"].isin(recent_gids)) &
+                    (all_before["team_abbreviation"] != opponent_team_abbr) &
+                    (all_before["_pos"] == pos_group)
+                ]
+                if not pos_rows.empty and stat_col in pos_rows.columns:
+                    opp_stat_allowed_pos = float(pos_rows[stat_col].mean())
+
     prefix = stat_col  # pts / reb / ast / fg3m / blk / stl / tov
     return {
         f"roll_{prefix}_5":        roll5,
@@ -614,8 +920,10 @@ def build_live_features(
         f"roll_{prefix}_std_5":    roll_std5,
         f"roll_{prefix}_std_10":   roll_std10,
         f"vs_opp_{prefix}_avg":    vs_opp_avg,
-        f"opp_{prefix}_allowed": opp_stat_allowed,   # market-specific defensive stat
-        "opp_avg_pts_allowed":   opp_avg_pts_allowed, # general defensive strength
+        f"opp_{prefix}_allowed":          opp_stat_allowed,        # season-long
+        f"opp_{prefix}_allowed_roll15":   opp_stat_allowed_roll,   # rolling 15-game
+        f"opp_{prefix}_allowed_pos":      opp_stat_allowed_pos,    # positional
+        "opp_avg_pts_allowed":   opp_avg_pts_allowed,
         "opp_team_pace":         opp_team_pace,
         "days_rest":             min(days_rest, 14),
         "back_to_back":          back_to_back,
@@ -629,6 +937,15 @@ def build_live_features(
         "min_trend":             (roll_min_5 / (roll_min_20 + 0.1))
                                  if not (pd.isna(roll_min_5) or pd.isna(roll_min_20))
                                  else 1.0,
+        "roll_team_pts_10":      roll_team_pts_10,
+        "roll_game_total_10":    roll_game_total_10,
+        # Pass-through for non-pts/reb/ast markets (no positional lookup for fg3m/blk/stl/tov)
+        "opp_fg3m_allowed_roll15": _DEFENSE_STAT_DEFAULTS["fg3m"] if stat_col != "fg3m" else opp_stat_allowed_roll,
+        "opp_blk_allowed_roll15":  _DEFENSE_STAT_DEFAULTS["blk"]  if stat_col != "blk"  else opp_stat_allowed_roll,
+        "opp_stl_allowed_roll15":  _DEFENSE_STAT_DEFAULTS["stl"]  if stat_col != "stl"  else opp_stat_allowed_roll,
+        "opp_tov_allowed_roll15":  _DEFENSE_STAT_DEFAULTS["tov"]  if stat_col != "tov"  else opp_stat_allowed_roll,
+        "opp_reb_allowed_pos":     opp_stat_allowed_pos if stat_col == "reb" else _DEFENSE_STAT_DEFAULTS["reb"],
+        "opp_ast_allowed_pos":     opp_stat_allowed_pos if stat_col == "ast" else _DEFENSE_STAT_DEFAULTS["ast"],
     }
 
 

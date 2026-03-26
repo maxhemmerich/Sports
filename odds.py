@@ -160,11 +160,69 @@ def parse_props(bookmakers: list[dict]) -> pd.DataFrame:
     return merged.reset_index(drop=True)
 
 
+def fetch_game_totals_and_spreads() -> dict[str, dict]:
+    """
+    Fetch game O/U totals and home-team point spreads for all today's NBA games.
+    Uses the bulk /odds endpoint (one API call for all games).
+
+    Returns dict: event_id → {"game_total": float | None, "home_spread": float | None}
+    """
+    try:
+        data = _get(
+            f"/sports/{SPORT}/odds",
+            params={
+                "regions": REGIONS,
+                "markets": "totals,spreads",
+                "oddsFormat": "american",
+            },
+        )
+    except Exception as e:
+        print(f"[odds] game totals/spreads fetch failed: {e}")
+        return {}
+
+    result: dict[str, dict] = {}
+    for event in (data if isinstance(data, list) else []):
+        eid = event.get("id", "")
+        home_team = event.get("home_team", "")
+        game_total: float | None = None
+        home_spread: float | None = None
+
+        for bk in event.get("bookmakers", []):
+            for mkt in bk.get("markets", []):
+                mkt_key = mkt.get("key", "")
+                if mkt_key == "totals" and game_total is None:
+                    for oc in mkt.get("outcomes", []):
+                        if oc.get("name", "").lower() == "over":
+                            try:
+                                game_total = float(oc["point"])
+                            except (KeyError, TypeError, ValueError):
+                                pass
+                            break
+                elif mkt_key == "spreads" and home_spread is None:
+                    for oc in mkt.get("outcomes", []):
+                        if oc.get("name", "") == home_team:
+                            try:
+                                home_spread = float(oc["point"])
+                            except (KeyError, TypeError, ValueError):
+                                pass
+                            break
+            if game_total is not None and home_spread is not None:
+                break  # got both from this bookmaker — done
+
+        if eid:
+            result[eid] = {"game_total": game_total, "home_spread": home_spread}
+
+    found = sum(1 for v in result.values() if v["game_total"] is not None)
+    print(f"[odds] game totals/spreads: {found}/{len(result)} events")
+    return result
+
+
 def get_today_lines() -> pd.DataFrame:
     """
     Fetch today's NBA player prop lines from the API.
     Player props require the per-event endpoint (bulk /odds does not support them).
     The screener caches the result for LINES_REFRESH_SECS to limit API usage.
+    Also attaches game_total and home_spread from the bulk odds endpoint.
     """
     today = date.today().isoformat()
 
@@ -172,6 +230,9 @@ def get_today_lines() -> pd.DataFrame:
     if not events:
         print("[odds] No NBA events found for today.")
         return pd.DataFrame()
+
+    # Fetch game totals and spreads once for all events (single API call)
+    game_context = fetch_game_totals_and_spreads()
 
     all_frames = []
     for ev in events:
@@ -189,6 +250,10 @@ def get_today_lines() -> pd.DataFrame:
                 df["home_team"] = home
                 df["away_team"] = away
                 df["commence_time"] = commence
+                # Attach game context (totals/spreads)
+                ctx = game_context.get(event_id, {})
+                df["game_total"] = ctx.get("game_total")   # float or NaN
+                df["home_spread"] = ctx.get("home_spread") # float or NaN
                 all_frames.append(df)
         except requests.HTTPError as e:
             print(f"  [warn] {event_id}: {e}")

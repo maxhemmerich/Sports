@@ -118,6 +118,17 @@ def _build_state() -> dict:
                 to_gain += profit
                 to_lose += stake
                 mkt = str(row.get("market", "")).replace("player_", "")
+                opening_odds = _si(row.get("opening_odds") or row.get("odds"), -110)
+                closing_odds_raw = row.get("closing_odds")
+                closing_odds = _si(closing_odds_raw, None) if closing_odds_raw is not None and str(closing_odds_raw).strip() not in ("", "nan", "None") else None
+                # CLV: positive = market moved your way (you got value early)
+                clv = None
+                if closing_odds is not None:
+                    from screener import implied_probability as _ip
+                    try:
+                        clv = round((_ip(closing_odds) - _ip(opening_odds)) * 100, 1)
+                    except Exception:
+                        pass
                 open_bets.append({
                     "tracker_idx": int(orig_idx),
                     "date": str(row.get("date", "")),
@@ -129,6 +140,9 @@ def _build_state() -> dict:
                     "bookmaker": str(row.get("bookmaker", "")),
                     "entered": round(stake, 2),
                     "to_win": profit,
+                    "opening_odds": opening_odds,
+                    "closing_odds": closing_odds,
+                    "clv": clv,
                 })
         except Exception:
             pass
@@ -158,7 +172,10 @@ def _build_state() -> dict:
                     "skipped": key in skipped,
                     "placed": key in placed,
                     "load_mgmt_risk": bool(row.get("load_mgmt_risk", False)),
+                    "injury_risk": bool(row.get("injury_risk", False)),
                     "parlay_note": str(row.get("parlay_note", "") or ""),
+                    "game_total": row.get("game_total"),
+                    "team_implied": row.get("team_implied_total"),
                 })
             except Exception:
                 pass
@@ -572,6 +589,8 @@ def api_place():
         "suggested_$": row["bet_dollars"],
         "entered_$": amount,
         "result": "",
+        "opening_odds": row["odds"],  # snapshot at placement for CLV tracking
+        "closing_odds": None,         # filled by screener loop; last seen before tip-off
     }
     new_df = pd.DataFrame([entry])
     if TRACKER_PATH.exists():
@@ -1184,7 +1203,11 @@ function renderPot() {
     const keyAttr = JSON.stringify(b.key).replace(/"/g, '&quot;');
     const sideClass = b.side === 'OVER' ? 'over' : 'under';
     const loadBadge = b.load_mgmt_risk ? '<span style="font-size:.64rem;background:rgba(210,153,34,.18);color:var(--yellow);border-radius:4px;padding:1px 5px;margin-left:2px" title="April game — possible load management">rest risk</span>' : '';
+    const injBadge  = b.injury_risk    ? '<span style="font-size:.64rem;background:rgba(248,81,73,.15);color:var(--red);border-radius:4px;padding:1px 5px;margin-left:2px" title="Player listed as Questionable">questionable</span>' : '';
     const parlayBadge = b.parlay_note ? `<div style="font-size:.67rem;color:var(--muted);margin-top:3px" title="Correlated leg — consider parlay">&#x1F517; parlay w/ ${b.parlay_note}</div>` : '';
+    const ctxBadge = (b.game_total != null)
+      ? `<span style="font-size:.64rem;color:var(--muted);margin-left:4px" title="Game total / team implied">O/U ${b.game_total}${b.team_implied != null ? ' · team ' + b.team_implied : ''}</span>`
+      : '';
     // Warn if game is already live (screener lines cache can lag up to 30 min)
     const playerLive = _liveStats[(b.player||'').toLowerCase()];
     const gameActive = playerLive && (playerLive.status === 'live' || playerLive.status === 'final');
@@ -1192,7 +1215,7 @@ function renderPot() {
     return `<div class="pot-tile">
       <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
         <span class="player">${b.player}</span>
-        <span class="edge">${b.edge_pct}% edge</span>${loadBadge}
+        <span class="edge">${b.edge_pct}% edge</span>${loadBadge}${injBadge}${ctxBadge}
       </div>
       <div class="tile-meta">
         ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
@@ -1284,9 +1307,16 @@ function renderOpen() {
           } else if (busted) {
             statusBadge = `<div class="bust-badge">&#9888; BUSTED — auto-settling in ${secsLeft}s <button class="btn-push" style="padding:1px 7px;font-size:.65rem" onclick="cancelBust(${b.tracker_idx})">Cancel</button></div>`;
           }
+          // CLV display
+          let clvHtml = '';
+          if (b.clv != null) {
+            const clvColor = b.clv > 0 ? 'var(--green)' : b.clv < 0 ? 'var(--red)' : 'var(--muted)';
+            const clvSign  = b.clv > 0 ? '+' : '';
+            clvHtml = `<span style="font-size:.62rem;color:${clvColor};margin-left:4px" title="Closing Line Value: positive = market moved in your direction">CLV ${clvSign}${b.clv}%</span>`;
+          }
           return `<div class="open-tile${busted ? ' bust' : ''}">
             ${statusBadge}
-            <div class="tile-player">${b.player}</div>
+            <div class="tile-player">${b.player}${clvHtml}</div>
             <div class="tile-meta">
               ${b.market} · <span class="${sideClass}">${b.side} ${b.line}</span> · ${fmtOdds(b.odds)}<br>
               <strong>$${b.entered.toFixed(2)}</strong> → <span class="green">+$${b.to_win.toFixed(2)}</span> · ${b.date}
