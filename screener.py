@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 import unicodedata
 from datetime import date, datetime, timezone
@@ -61,6 +62,7 @@ CURRENT_SEASON_START = "2025-10-01"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
 STATE_PATH = RESULTS_DIR / "state.json"
+_STATE_LOCK = threading.Lock()  # guards all state.json read-modify-write ops
 BALANCE_LOG_PATH = RESULTS_DIR / "balance_log.csv"
 ADJUSTMENTS_PATH = RESULTS_DIR / "adjustments.csv"
 DEFAULT_BOOKS = ["draftkings", "fanduel", "betmgm"]
@@ -808,9 +810,10 @@ def _load_state() -> dict:
 
 def _save_state(data: dict) -> None:
     import json as _json
-    existing = _load_state()
-    existing.update(data)
-    STATE_PATH.write_text(_json.dumps(existing, indent=2))
+    with _STATE_LOCK:
+        existing = _load_state()
+        existing.update(data)
+        STATE_PATH.write_text(_json.dumps(existing, indent=2))
 
 
 def _get_book_balances() -> dict[str, float]:
@@ -820,9 +823,12 @@ def _get_book_balances() -> dict[str, float]:
 
 def _update_book_balance(book: str, delta: float) -> float:
     """Add delta to a book's tradeable balance. Returns the new tradeable value."""
-    balances = _get_book_balances()
-    balances[book] = balances.get(book, 0.0) + delta
-    _save_state({"book_balances": balances})
+    with _STATE_LOCK:
+        existing = _load_state()
+        balances = existing.get("book_balances", {})
+        balances[book] = balances.get(book, 0.0) + delta
+        existing["book_balances"] = balances
+        STATE_PATH.write_text(json.dumps(existing, indent=2))
     return balances[book]
 
 
