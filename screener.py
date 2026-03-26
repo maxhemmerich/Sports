@@ -29,6 +29,7 @@ load_dotenv()
 
 from data import load_gamelogs
 from features import build_live_features, MARKET_CONFIG
+from injury import get_injury_report
 from model import load_model, predict
 from odds import get_today_lines, american_to_decimal, implied_probability
 
@@ -194,6 +195,8 @@ def screen_player(
     def_lookup=None,
     target: str = "pts",
     market: str = "player_points",
+    game_total: float | None = None,
+    home_spread: float | None = None,
 ) -> dict | None:
     """
     Run the full screening pipeline for one player-line.
@@ -221,6 +224,17 @@ def screen_player(
     opp_abbr = away_team[:3].upper() if is_home_approx else home_team[:3].upper()
     game_date = _game_date_local(commence_time)
 
+    # Compute team-implied total from market game total + home spread
+    team_implied_total: float | None = None
+    if game_total is not None and not pd.isna(game_total):
+        if home_spread is not None and not pd.isna(home_spread):
+            if is_home_approx:
+                team_implied_total = (float(game_total) - float(home_spread)) / 2
+            else:
+                team_implied_total = (float(game_total) + float(home_spread)) / 2
+        else:
+            team_implied_total = float(game_total) / 2
+
     feats = build_live_features(
         player_name=player_name,
         opponent_team_abbr=opp_abbr,
@@ -229,6 +243,8 @@ def screen_player(
         df_history=df_history,
         def_lookup=def_lookup,
         target=target,
+        game_total=game_total,
+        team_implied_total=team_implied_total,
     )
     if not feats:
         return None
@@ -237,6 +253,14 @@ def screen_player(
         prediction = predict(feats, model, target=target)
     except Exception:
         return None
+
+    # B2B fatigue adjustment: high-minute players show measurable decline on back-to-backs
+    if feats.get("back_to_back") == 1:
+        avg_min = feats.get("roll_min_10") or 0
+        if avg_min >= 34:
+            prediction *= 0.96   # 4% reduction for heavy-minute players (34+ mpg)
+        elif avg_min >= 28:
+            prediction *= 0.98   # 2% reduction for moderate-minute starters (28-33 mpg)
 
     diff = prediction - line
     if abs(diff) < MIN_LINE_DIFF:
@@ -290,6 +314,8 @@ def screen_player(
         "commence_time": commence_time,
         "player_team": team_abbr,
         "load_mgmt_risk": load_mgmt_risk,
+        "game_total": game_total,
+        "team_implied_total": round(team_implied_total, 1) if team_implied_total is not None else None,
     }
 
 
@@ -382,6 +408,18 @@ def run_screener(
     nba_names = list(df_history["player_name"].unique())
     norm_to_nba = {_norm(n): n for n in nba_names}
 
+    # Fetch injury report — filter out players who are Out/Doubtful
+    try:
+        _injured, _questionable = get_injury_report()
+    except Exception:
+        _injured, _questionable = set(), set()
+
+    def _injury_norm(name: str) -> str:
+        import unicodedata as _ud
+        n = _ud.normalize("NFD", name)
+        n = "".join(c for c in n if _ud.category(c) != "Mn")
+        return " ".join(n.strip().lower().split())
+
     # Load active (unsettled) bets so we don't show bets we're already in
     active_bets: set[tuple[str, str]] = set()
     _tracker_path = RESULTS_DIR / "bet_tracker.csv"
@@ -403,6 +441,7 @@ def run_screener(
     # seen key = (player_raw, market, bookmaker) — evaluate each book's line independently
     seen_keys = set()
     n_no_history = 0
+    n_injured = 0
 
     for _, row in lines_df.iterrows():
         player = row.get("player_name", "")
@@ -426,12 +465,19 @@ def run_screener(
                 n_no_history += 1
                 continue
 
+        # Injury filter — skip Out/Doubtful players
+        if _injury_norm(nba_player) in _injured:
+            n_injured += 1
+            continue
+
         over_price = row.get("over_price")
         under_price = row.get("under_price")
         bookmaker = row.get("bookmaker", "unknown")
         home_team = row.get("home_team", "")
         away_team = row.get("away_team", "")
         commence_time = row.get("commence_time", "")
+        game_total_val = row.get("game_total")
+        home_spread_val = row.get("home_spread")
 
         _, target = MARKET_CONFIG.get(market, (None, "pts"))
         model = models.get(market)
@@ -449,6 +495,8 @@ def run_screener(
             commence_time=commence_time,
             df_history=df_history,
             model=model,
+            game_total=float(game_total_val) if game_total_val is not None and not pd.isna(game_total_val) else None,
+            home_spread=float(home_spread_val) if home_spread_val is not None and not pd.isna(home_spread_val) else None,
             def_lookup=def_lookup,
             target=target,
             market=market,
@@ -457,12 +505,15 @@ def run_screener(
         if result:
             nba_player_check = norm_to_nba.get(_norm(player), player)
             result["in_play"] = (nba_player_check, market) in active_bets
+            # Flag questionable players (injury risk but not excluded)
+            result["injury_risk"] = _injury_norm(nba_player) in _questionable
             results.append(result)
 
-    unique_players = len({k[0] for k in seen_keys})  # k = (player, market, bookmaker)
+    unique_players = len({k[0] for k in seen_keys})
     print(f"[screener] Lines evaluated: {len(seen_keys)} | "
           f"Players matched: {unique_players} | "
           f"No history: {n_no_history} | "
+          f"Injured/skipped: {n_injured} | "
           f"Flagged: {len(results)}")
 
     if debug:
@@ -511,6 +562,46 @@ def run_screener(
     if not results:
         print("[screener] No +EV bets found today.")
         return pd.DataFrame()
+
+    # ── Line shopping: find best available price per (player, market, side) ───
+    # Build a lookup: (player_raw_name, market, side) → (best_price, best_book)
+    _price_col = {"OVER": "over_price", "UNDER": "under_price"}
+    _shop: dict[tuple, tuple] = {}
+    for _, row in lines_df.iterrows():
+        p_raw = row.get("player_name", "")
+        mkt = row.get("market", "")
+        bk = row.get("bookmaker", "")
+        if not p_raw or not mkt:
+            continue
+        nba_p = norm_to_nba.get(_norm(p_raw), p_raw)
+        ln = row.get("line")
+        if pd.isna(ln):
+            continue
+        for side_key, price_key in _price_col.items():
+            price = row.get(price_key)
+            if pd.isna(price) or price is None:
+                continue
+            shop_key = (nba_p, mkt, float(ln), side_key)
+            existing_price, _ = _shop.get(shop_key, (None, None))
+            # Best price = highest American odds (most favorable payout)
+            if existing_price is None or float(price) > existing_price:
+                _shop[shop_key] = (float(price), bk)
+
+    # Apply best price to each flagged bet
+    n_shopped = 0
+    for r in results:
+        shop_key = (r["player"], r["market"], float(r["line"]), r["side"])
+        best_price, best_book = _shop.get(shop_key, (None, None))
+        if best_price is not None and best_book is not None:
+            if best_price > r["odds"] or best_book != r["bookmaker"]:
+                r["odds_original"] = r["odds"]
+                r["bookmaker_original"] = r["bookmaker"]
+                r["odds"] = best_price
+                r["bookmaker"] = best_book
+                n_shopped += 1
+
+    if n_shopped:
+        print(f"[screener] Line shopped: {n_shopped} bet(s) upgraded to better price/book")
 
     bets_df = pd.DataFrame(results).sort_values("edge_pct", ascending=False).reset_index(drop=True)
 
@@ -1290,6 +1381,44 @@ if __name__ == "__main__":
                         _st["book_balances"] = _get_book_balances()
 
                     _st["prev_unplaced_keys"] = unplaced_keys
+
+                    # ── CLV tracking: update closing_odds for open bets ──────
+                    # Each screener tick, for any open bet whose line is still
+                    # visible in the lines cache, record the current best odds.
+                    # The last update before the game tips = "closing line".
+                    if TRACKER_PATH.exists() and _st["lines_cache"] is not None:
+                        try:
+                            _clv_df = pd.read_csv(TRACKER_PATH)
+                            _open_mask = _clv_df["result"].isna() | (_clv_df["result"].astype(str).str.strip() == "")
+                            _open_bets = _clv_df[_open_mask]
+                            if not _open_bets.empty:
+                                _lines = _st["lines_cache"]
+                                _updated = False
+                                for _ci, _crow in _open_bets.iterrows():
+                                    _cp = str(_crow.get("player", "")).strip().lower()
+                                    _cm = str(_crow.get("market", "")).strip()
+                                    _cs = str(_crow.get("side", "")).strip().upper()
+                                    _cl = _crow.get("line")
+                                    if not _cp or not _cm or pd.isna(_cl):
+                                        continue
+                                    _price_col2 = "over_price" if _cs == "OVER" else "under_price"
+                                    _match = _lines[
+                                        (_lines["player_name"].str.lower() == _cp) &
+                                        (_lines["market"] == _cm) &
+                                        (_lines["line"] == float(_cl)) &
+                                        (_lines[_price_col2].notna())
+                                    ]
+                                    if _match.empty:
+                                        continue
+                                    _best_close = float(_match[_price_col2].max())
+                                    if "closing_odds" not in _clv_df.columns:
+                                        _clv_df["closing_odds"] = None
+                                    _clv_df.at[_ci, "closing_odds"] = _best_close
+                                    _updated = True
+                                if _updated:
+                                    _clv_df.to_csv(TRACKER_PATH, index=False)
+                        except Exception:
+                            pass
 
                     with _latest_lock:
                         _st["latest_bets"] = unplaced_bets
