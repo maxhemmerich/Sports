@@ -748,35 +748,20 @@ def build_live_features(
             )
 
     # ── Game context features ──────────────────────────────────────────────────
-    # Rolling team scoring averages from historical logs
+    # Use pre-computed lookup (fast) rather than inline groupby on full history
     roll_team_pts_10   = _TEAM_PTS_DEFAULT
     roll_game_total_10 = _GAME_TOTAL_DEFAULT
-    if "pts" in player_df.columns and "game_id" in df_history.columns and player_team:
-        # Compute from full game logs (not just player_df) to sum all teammates
-        cutoff = pd.Timestamp(game_date)
-        all_before = df_history[df_history["game_date"] < cutoff]
-        team_game_pts = (
-            all_before[all_before["team_abbreviation"] == player_team]
-            .groupby("game_id")["pts"].sum()
-        )
-        # Get dates for those game IDs
-        game_dates = (
-            all_before[all_before["team_abbreviation"] == player_team]
-            .groupby("game_id")["game_date"].first()
-        )
-        if not team_game_pts.empty:
-            tdf = pd.DataFrame({"pts": team_game_pts, "game_date": game_dates}).sort_values("game_date")
-            roll_team_pts_10 = float(tdf["pts"].iloc[:-0 if len(tdf) == 0 else None].tail(10).mean())
-
-        # Game total: need both teams' pts per game
-        game_totals_by_id = all_before.groupby("game_id")["pts"].sum()
-        gt_dates = all_before.groupby("game_id")["game_date"].first()
-        team_game_ids = set(team_game_pts.index)
-        if team_game_ids:
-            gt_df = pd.DataFrame({"total": game_totals_by_id, "game_date": gt_dates})
-            gt_df = gt_df[gt_df.index.isin(team_game_ids)].sort_values("game_date")
-            if not gt_df.empty:
-                roll_game_total_10 = float(gt_df["total"].tail(10).mean())
+    if player_team:
+        _ctx = build_game_context_lookup()
+        if not _ctx.empty:
+            _team_ctx = _ctx[
+                (_ctx["team_abbreviation"] == player_team) &
+                (_ctx["game_date"] < pd.Timestamp(game_date))
+            ].sort_values("game_date")
+            if not _team_ctx.empty:
+                _last = _team_ctx.iloc[-1]
+                roll_team_pts_10   = float(_last["roll_team_pts_10"])
+                roll_game_total_10 = float(_last["roll_game_total_10"])
 
     # Use live market game_total / team_implied_total if provided (more accurate than historical avg)
     if game_total is not None and not pd.isna(game_total):
@@ -785,26 +770,19 @@ def build_live_features(
         roll_team_pts_10 = float(team_implied_total)
 
     # ── Rolling opponent defense (last 15 games) ───────────────────────────────
+    # Use pre-computed lookup keyed by (defending_team, game_date) — O(1) vs O(n) groupby
     opp_stat_allowed_roll = _DEFENSE_STAT_DEFAULTS.get(stat_col, opp_stat_allowed)
-    if opponent_team_abbr and "game_id" in df_history.columns and "team_abbreviation" in df_history.columns:
-        cutoff = pd.Timestamp(game_date)
-        all_before = df_history[df_history["game_date"] < cutoff]
-        # Find all game_ids where the opponent team played
-        opp_game_ids_dated = (
-            all_before[all_before["team_abbreviation"] == opponent_team_abbr]
-            .groupby("game_id")["game_date"].first()
-            .sort_values()
-        )
-        if not opp_game_ids_dated.empty:
-            recent_gids = opp_game_ids_dated.index[-_ROLL_DEF_WINDOW:]
-            # Stats allowed = what the non-opponent team scored in those games
-            opp_allowed_rows = all_before[
-                (all_before["game_id"].isin(recent_gids)) &
-                (all_before["team_abbreviation"] != opponent_team_abbr)
-            ]
-            if not opp_allowed_rows.empty and stat_col in opp_allowed_rows.columns:
-                per_game = opp_allowed_rows.groupby("game_id")[stat_col].sum()
-                opp_stat_allowed_roll = float(per_game.mean())
+    if opponent_team_abbr:
+        _rdef = build_rolling_defense_lookup(_ROLL_DEF_WINDOW)
+        if not _rdef.empty and "game_date" in _rdef.columns:
+            _opp_def = _rdef[
+                (_rdef["defending_team"] == opponent_team_abbr) &
+                (_rdef["game_date"] < pd.Timestamp(game_date))
+            ].sort_values("game_date")
+            if not _opp_def.empty:
+                _col = f"opp_{stat_col}_allowed_roll{_ROLL_DEF_WINDOW}"
+                if _col in _opp_def.columns:
+                    opp_stat_allowed_roll = float(_opp_def.iloc[-1][_col])
 
     # ── Positional defense ────────────────────────────────────────────────────
     roll_reb_10_for_pos = float(player_df["reb"].tail(10).mean()) if "reb" in player_df.columns else 0.0
@@ -817,41 +795,19 @@ def build_live_features(
     else:
         pos_group = "guard"
 
-    # Positional defense: avg stat allowed by opponent to players in this position group
+    # Positional defense: use pre-computed lookup — fast filter vs heavy inline groupby
     opp_stat_allowed_pos = opp_stat_allowed  # fallback to season-long
-    if opponent_team_abbr and stat_col in ["pts", "reb", "ast"] and "game_id" in df_history.columns:
-        cutoff = pd.Timestamp(game_date)
-        all_before = df_history[df_history["game_date"] < cutoff].copy()
-        if "roll_reb_10" not in all_before.columns and "reb" in all_before.columns:
-            all_before["_tmp_reb_roll"] = (
-                all_before.groupby("player_id")["reb"]
-                .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
-                if "player_id" in all_before.columns else all_before["reb"]
-            )
-            reb_col = "_tmp_reb_roll"
-        else:
-            reb_col = "roll_reb_10" if "roll_reb_10" in all_before.columns else None
-
-        if reb_col:
-            rr = all_before[reb_col].fillna(0)
-            all_before["_pos"] = "guard"
-            all_before.loc[rr >= 4, "_pos"] = "forward"
-            all_before.loc[rr >= 7, "_pos"] = "big"
-
-            opp_game_ids_dated = (
-                all_before[all_before["team_abbreviation"] == opponent_team_abbr]
-                .groupby("game_id")["game_date"].first()
-                .sort_values()
-            )
-            if not opp_game_ids_dated.empty:
-                recent_gids = opp_game_ids_dated.index[-15:]
-                pos_rows = all_before[
-                    (all_before["game_id"].isin(recent_gids)) &
-                    (all_before["team_abbreviation"] != opponent_team_abbr) &
-                    (all_before["_pos"] == pos_group)
-                ]
-                if not pos_rows.empty and stat_col in pos_rows.columns:
-                    opp_stat_allowed_pos = float(pos_rows[stat_col].mean())
+    if opponent_team_abbr and stat_col in ["pts", "reb", "ast"]:
+        _pdef = build_positional_defense_lookup()
+        if not _pdef.empty:
+            _pos_rows = _pdef[
+                (_pdef["defending_team"] == opponent_team_abbr) &
+                (_pdef["pos_group"] == pos_group)
+            ]
+            if not _pos_rows.empty:
+                _pcol = f"opp_{stat_col}_allowed_pos"
+                if _pcol in _pos_rows.columns:
+                    opp_stat_allowed_pos = float(_pos_rows.iloc[-1][_pcol])
 
     prefix = stat_col  # pts / reb / ast / fg3m / blk / stl / tov
     return {

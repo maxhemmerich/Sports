@@ -24,6 +24,10 @@ CURRENT_SEASON = SEASONS[-1]
 GAMELOG_CACHE_HOURS = int(__import__("os").getenv("GAMELOG_CACHE_HOURS", "12"))
 COMBINED_CACHE_HOURS = int(__import__("os").getenv("COMBINED_CACHE_HOURS", "12"))
 
+# In-memory caches for lookup DataFrames — populated on first call, reused every subsequent call
+# within the same process (survives across screener ticks without re-reading CSV)
+_LOOKUP_CACHE: dict[str, "pd.DataFrame"] = {}
+
 # Dtype map — use float32/int32 to halve memory vs pandas' default float64/int64
 _GAMELOG_DTYPES: dict = {
     "player_id": "Int32",
@@ -367,11 +371,16 @@ def build_rolling_defense_lookup(window: int = 15) -> pd.DataFrame:
 
     Cached to data/rolling_defense_{N}g.csv.
     """
+    _key = f"rolling_def_{window}"
+    if _key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[_key]
     out_path = DATA_DIR / f"rolling_defense_{window}g.csv"
     if out_path.exists():
         age_hours = (time.time() - out_path.stat().st_mtime) / 3600
         if age_hours <= COMBINED_CACHE_HOURS:
-            return pd.read_csv(out_path)
+            df = pd.read_csv(out_path, parse_dates=["game_date"])
+            _LOOKUP_CACHE[_key] = df
+            return df
         out_path.unlink()
 
     df = load_gamelogs()
@@ -419,9 +428,10 @@ def build_rolling_defense_lookup(window: int = 15) -> pd.DataFrame:
         )
         roll_cols.append(col)
 
-    result = team_game[["game_id", "defending_team"] + roll_cols].copy()
+    result = team_game[["game_id", "game_date", "defending_team"] + roll_cols].copy()
     result.to_csv(out_path, index=False)
     print(f"[data] Rolling {window}-game defense lookup → {out_path} ({len(result)} rows)")
+    _LOOKUP_CACHE[f"rolling_def_{window}"] = result
     return result
 
 
@@ -438,11 +448,16 @@ def build_positional_defense_lookup(window: int = 15) -> pd.DataFrame:
 
     Cached to data/positional_defense.csv.
     """
+    _key = "positional_defense"
+    if _key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[_key]
     out_path = DATA_DIR / "positional_defense.csv"
     if out_path.exists():
         age_hours = (time.time() - out_path.stat().st_mtime) / 3600
         if age_hours <= COMBINED_CACHE_HOURS:
-            return pd.read_csv(out_path)
+            df = pd.read_csv(out_path)
+            _LOOKUP_CACHE[_key] = df
+            return df
         out_path.unlink()
 
     df = load_gamelogs()
@@ -503,6 +518,7 @@ def build_positional_defense_lookup(window: int = 15) -> pd.DataFrame:
     )
     result.to_csv(out_path, index=False)
     print(f"[data] Positional defense lookup → {out_path} ({len(result)} rows)")
+    _LOOKUP_CACHE["positional_defense"] = result
     return result
 
 
@@ -516,11 +532,16 @@ def build_game_context_lookup() -> pd.DataFrame:
 
     Cached to data/game_context.csv.
     """
+    _key = "game_context"
+    if _key in _LOOKUP_CACHE:
+        return _LOOKUP_CACHE[_key]
     out_path = DATA_DIR / "game_context.csv"
     if out_path.exists():
         age_hours = (time.time() - out_path.stat().st_mtime) / 3600
         if age_hours <= COMBINED_CACHE_HOURS:
-            return pd.read_csv(out_path)
+            df = pd.read_csv(out_path, parse_dates=["game_date"])
+            _LOOKUP_CACHE[_key] = df
+            return df
         out_path.unlink()
 
     df = load_gamelogs()
@@ -555,9 +576,10 @@ def build_game_context_lookup() -> pd.DataFrame:
         .transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
     ).astype("float32")
 
-    result = team_game[["game_id", "team_abbreviation", "roll_team_pts_10", "roll_game_total_10"]]
+    result = team_game[["game_id", "team_abbreviation", "game_date", "roll_team_pts_10", "roll_game_total_10"]]
     result.to_csv(out_path, index=False)
     print(f"[data] Game context lookup → {out_path} ({len(result)} rows)")
+    _LOOKUP_CACHE["game_context"] = result
     return result
 
 
