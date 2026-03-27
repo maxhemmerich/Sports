@@ -59,6 +59,7 @@ MAX_BETS_PER_GAME = int(os.getenv("MAX_BETS_PER_GAME", "3"))      # max correlat
 MIN_WIN_PROB = float(os.getenv("MIN_WIN_PROB", "0.53"))            # minimum model win probability to flag
 MIN_GAMES = int(os.getenv("MIN_GAMES", "20"))           # min career games in DB before flagging
 MIN_SEASON_GAMES = int(os.getenv("MIN_SEASON_GAMES", "15"))  # min games in current season (Oct–present)
+MIN_MINUTES_FLOOR = float(os.getenv("MIN_MINUTES_FLOOR", "18"))  # skip players averaging < N min/game
 CURRENT_SEASON_START = "2025-10-01"
 RESULTS_DIR = Path("results")
 RESULTS_DIR.mkdir(exist_ok=True)
@@ -197,6 +198,7 @@ def screen_player(
     market: str = "player_points",
     game_total: float | None = None,
     home_spread: float | None = None,
+    bias_log: list | None = None,
 ) -> dict | None:
     """
     Run the full screening pipeline for one player-line.
@@ -249,6 +251,11 @@ def screen_player(
     if not feats:
         return None
 
+    # Minutes floor: skip bench/limited players — model has less signal below this
+    roll_min_10 = feats.get("roll_min_10")
+    if roll_min_10 is not None and not pd.isna(roll_min_10) and float(roll_min_10) < MIN_MINUTES_FLOOR:
+        return None
+
     try:
         prediction = predict(feats, model, target=target)
     except Exception:
@@ -263,6 +270,18 @@ def screen_player(
             prediction *= 0.98   # 2% reduction for moderate-minute starters (28-33 mpg)
 
     diff = prediction - line
+
+    # Always record raw diff for bias diagnostics (before any threshold filters)
+    if bias_log is not None:
+        bias_log.append((market, diff))
+
+    # Model quality gate: blk/stl models have MAE ≈ target mean — require larger diff
+    _low_acc = {"player_blocks": 0.50, "player_steals": 0.67}
+    if market in _low_acc:
+        _mae = getattr(model, "train_mae_", None) or _low_acc[market]
+        if abs(diff) <= 1.5 * _mae:
+            return None
+
     if abs(diff) < MIN_LINE_DIFF:
         return None
 
@@ -376,6 +395,8 @@ def run_screener(
     supported_markets = set(MARKET_CONFIG.keys())
     if "market" in lines_df.columns:
         lines_df = lines_df[lines_df["market"].isin(supported_markets)]
+
+    _bias_log: list = []  # collects (market, pred-line) for all matched players
 
     # Filter to specific bookmaker(s) if requested (active_books toggle only — balance does not hide bets)
     if bookmaker_filter and "bookmaker" in lines_df.columns:
@@ -500,6 +521,7 @@ def run_screener(
             def_lookup=def_lookup,
             target=target,
             market=market,
+            bias_log=_bias_log,
         )
 
         if result:
@@ -515,6 +537,20 @@ def run_screener(
           f"No history: {n_no_history} | "
           f"Injured/skipped: {n_injured} | "
           f"Flagged: {len(results)}")
+
+    # Bias diagnostic: avg (prediction - line) per market — negative = model skews under
+    if _bias_log:
+        from collections import defaultdict as _dd
+        _mkt_diffs: dict = _dd(list)
+        for _bm, _bd in _bias_log:
+            _mkt_diffs[_bm].append(_bd)
+        _parts = []
+        for _bm in sorted(_mkt_diffs):
+            _ds = _mkt_diffs[_bm]
+            _avg = sum(_ds) / len(_ds)
+            _short = _bm.replace("player_", "")[:4]
+            _parts.append(f"{_short}:{_avg:+.1f}(n={len(_ds)})")
+        print(f"[screener] Bias (pred-line): {' | '.join(_parts)}")
 
     if debug:
         from model import predict as _pred
