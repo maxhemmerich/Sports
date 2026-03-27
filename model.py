@@ -249,8 +249,9 @@ def _train_target(target: str, do_eval: bool, retrain: bool) -> XGBRegressor:
         print(f"  [model] OOS sigma failed ({_e}) — falling back to in-sample")
 
     residual_sigma = oos_sigma if oos_sigma else float(np.std(y.values - preds))
-    # Store sigma on the model so screener can use data-driven edge estimates
+    # Store sigma and MAE on the model so screener can use data-driven thresholds
     model.residual_sigma_ = residual_sigma
+    model.train_mae_ = float(mae)
     save_model(model, path)
     print(f"  In-sample MAE={mae:.2f}  RMSE={rmse:.2f}  residual_sigma={residual_sigma:.2f} ({'OOS' if oos_sigma else 'in-sample'})")
 
